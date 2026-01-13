@@ -30,4 +30,4 @@ speechbrain>=0.5.15
 matplotlib
 whisper-openai
 silentcipher @ git+https://github.com/SesameAILabs/silentcipher@master
-numpy==1.26.0
+numpy>=1.26.0

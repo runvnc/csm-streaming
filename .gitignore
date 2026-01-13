@@ -44,3 +44,11 @@ context_audio.wav
 # Model files
 *.pt
 *.ckpt
+
+models
+*.mp3
+*.db
+
+build.log
+*.jit
+config/
