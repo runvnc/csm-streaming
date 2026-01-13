@@ -169,6 +169,9 @@ class Generator:
     ):
         """
         Generate audio in a streaming fashion, optimized for lower latency to first chunk.
+        
+        Profiling output shows timing for each stage:
+        - Context tokenization, text tokenization, frame generation, audio decoding
         """
         if torch.cuda.is_available():
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -176,32 +179,43 @@ class Generator:
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
+        # === PROFILING: Start overall timing ===
+        profile_start = time.time()
+        
         self._model.reset_caches()
 
         max_generation_len = int(max_audio_length_ms / 80)
 
         tokens, tokens_mask = [], []
 
-        initial_batch_size = 20
-        normal_batch_size = 20  
-        initial_buffer_size = 20
-        normal_buffer_size = 20
+        initial_batch_size = 2
+        normal_batch_size = 2  
+        initial_buffer_size = 2
+        normal_buffer_size = 2
         
         batch_size = initial_batch_size
         buffer_size = initial_buffer_size
         first_chunk_delivered = False
 
-        context_start = time.time()
+        # === PROFILING: Context tokenization ===
+        context_tok_start = time.time()
         if context:
             for segment in context:
                 segment_tokens, segment_tokens_mask = self._tokenize_segment(segment)
                 tokens.append(segment_tokens)
                 tokens_mask.append(segment_tokens_mask)
+        context_tok_time = (time.time() - context_tok_start) * 1000
+        logger.info(f"[PROFILE] Context tokenization: {context_tok_time:.1f}ms ({len(context)} segments)")
 
+        # === PROFILING: Text tokenization ===
+        text_tok_start = time.time()
         gen_segment_tokens, gen_segment_tokens_mask = self._tokenize_text_segment(text, speaker)
         tokens.append(gen_segment_tokens)
         tokens_mask.append(gen_segment_tokens_mask)
+        text_tok_time = (time.time() - text_tok_start) * 1000
+        logger.info(f"[PROFILE] Text tokenization: {text_tok_time:.1f}ms ({gen_segment_tokens.size(0)} tokens)")
 
+        # === PROFILING: Prompt preparation ===
         prompt_tokens = torch.cat(tokens, dim=0).long().to(self.device)
         prompt_tokens_mask = torch.cat(tokens_mask, dim=0).bool().to(self.device)
 
@@ -213,6 +227,10 @@ class Generator:
         curr_tokens = prompt_tokens.unsqueeze(0)
         curr_tokens_mask = prompt_tokens_mask.unsqueeze(0)
         curr_pos = torch.arange(0, prompt_tokens.size(0)).unsqueeze(0).long().to(self.device)
+
+        prep_time = (time.time() - profile_start) * 1000
+        logger.info(f"[PROFILE] Total preparation time: {prep_time:.1f}ms (prompt size: {prompt_tokens.size(0)} tokens)")
+        logger.info(f"[PROFILE] Chunk config: buffer_size={buffer_size} frames ({buffer_size * 80}ms audio), batch_size={batch_size}")
 
         expected_frame_count = buffer_size 
         frame_buffer = []
@@ -230,6 +248,9 @@ class Generator:
         with self._audio_tokenizer.streaming(1):
             i = 0
             generation_start = time.time()
+            first_frame_time = None
+            frame_times = []
+            decode_times = []
 
             while i < max_generation_len:
                 batch_end = min(i + batch_size, max_generation_len)
@@ -238,6 +259,7 @@ class Generator:
                 batch_samples = []
 
                 for _ in range(batch_size_actual):
+                    frame_start = time.time()
                     with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                         sample = self._model.generate_frame(curr_tokens, curr_tokens_mask, curr_pos, temperature, topk)
                         if torch.cuda.is_available() and hasattr(torch, "cuda") and hasattr(torch.cuda, "is_available"):
@@ -254,6 +276,13 @@ class Generator:
 
                     batch_samples.append(sample)
                     update_tokens(sample)
+                    
+                    frame_time = (time.time() - frame_start) * 1000
+                    frame_times.append(frame_time)
+                    
+                    if first_frame_time is None:
+                        first_frame_time = (time.time() - generation_start) * 1000
+                        logger.info(f"[PROFILE] First frame generated: {first_frame_time:.1f}ms")
 
                 if not batch_samples:
                     break
@@ -275,8 +304,11 @@ class Generator:
                         # Combine actual frames with padding
                         frames_to_process = frames_to_process + padding_frames
                     
+                    decode_start = time.time()
                     frames_stacked = torch.stack(frames_to_process).permute(1, 2, 0)
                     audio_chunk = self._audio_tokenizer.decode(frames_stacked).squeeze(0).squeeze(0)
+                    decode_time = (time.time() - decode_start) * 1000
+                    decode_times.append(decode_time)
                     
                     # Keep remaining frames for next iteration
                     frame_buffer = frame_buffer[expected_frame_count:]
@@ -288,6 +320,13 @@ class Generator:
                     
                     # After first chunk is delivered, switch to normal batch and buffer sizes
                     if not first_chunk_delivered:
+                        first_chunk_total = (time.time() - profile_start) * 1000
+                        chunk_samples = len(cpu_chunk)
+                        chunk_duration_ms = (chunk_samples / self.sample_rate) * 1000
+                        logger.info(f"[PROFILE] === FIRST CHUNK DELIVERED ===")
+                        logger.info(f"[PROFILE] First chunk latency (total): {first_chunk_total:.1f}ms")
+                        logger.info(f"[PROFILE] First chunk size: {chunk_samples} samples ({chunk_duration_ms:.1f}ms audio)")
+                        logger.info(f"[PROFILE] Decode time for first chunk: {decode_time:.1f}ms")
                         batch_size = normal_batch_size
                         buffer_size = normal_buffer_size
                         expected_frame_count = buffer_size
@@ -341,6 +380,17 @@ class Generator:
             print(f"Total time: {total_time:.2f}s")
             print(f"Generated {frames_generated} frames ({audio_seconds:.2f}s of audio)")
             print(f"Real-time factor: {rtf:.3f}x (target: <1.0)")
+            
+            # === PROFILING: Summary statistics ===
+            if frame_times:
+                avg_frame_time = sum(frame_times) / len(frame_times)
+                min_frame_time = min(frame_times)
+                max_frame_time = max(frame_times)
+                logger.info(f"[PROFILE] Frame generation stats: avg={avg_frame_time:.2f}ms, min={min_frame_time:.2f}ms, max={max_frame_time:.2f}ms")
+            if decode_times:
+                avg_decode_time = sum(decode_times) / len(decode_times)
+                logger.info(f"[PROFILE] Decode stats: avg={avg_decode_time:.2f}ms per chunk ({len(decode_times)} chunks)")
+            logger.info(f"[PROFILE] Codebooks: {self._num_codebooks}, Sample rate: {self.sample_rate}Hz")
 
     @torch.inference_mode()
     def generate(
