@@ -583,7 +583,7 @@ import torch
 from models import Model, ModelArgs
 from generator import Generator
 
-def load_csm_1b_local(model_path: str, device: str = "cuda", audio_num_codebooks: int = 16):
+def load_csm_1b_local(model_path: str, device: str = "cuda", audio_num_codebooks: int = 32):
     """
     Load the CSM-1B model from a local checkpoint with extreme optimizations and warmup.
     """
@@ -785,7 +785,7 @@ def warmup_generator(gen: Generator, warmup_text: str = "Hello, this is a compre
     
     print("Maximum-intensity warmup complete. First generation should now be MUCH faster.")
 
-def load_csm_1b(device: str = "cuda", audio_num_codebooks: int = 16) -> Generator:
+def load_csm_1b(device: str = "cuda", audio_num_codebooks: int = 32) -> Generator:
     """
     Load the CSM-1B model with extreme optimizations for real-time performance.
     """
