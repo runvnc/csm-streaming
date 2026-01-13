@@ -188,10 +188,10 @@ class Generator:
 
         tokens, tokens_mask = [], []
 
-        initial_batch_size = 2
-        normal_batch_size = 2  
-        initial_buffer_size = 2
-        normal_buffer_size = 2
+        initial_batch_size = 3
+        normal_batch_size = 3  
+        initial_buffer_size = 3
+        normal_buffer_size = 3
         
         batch_size = initial_batch_size
         buffer_size = initial_buffer_size
@@ -583,7 +583,7 @@ import torch
 from models import Model, ModelArgs
 from generator import Generator
 
-def load_csm_1b_local(model_path: str, device: str = "cuda", audio_num_codebooks: int = 32):
+def load_csm_1b_local(model_path: str, device: str = "cuda", audio_num_codebooks: int = 16):
     """
     Load the CSM-1B model from a local checkpoint with extreme optimizations and warmup.
     """
@@ -615,6 +615,11 @@ def load_csm_1b_local(model_path: str, device: str = "cuda", audio_num_codebooks
 
     model = Model.from_pretrained(model_path)
     model.eval()
+    
+    # Override codebook count if different from model default
+    if model.config.audio_num_codebooks != audio_num_codebooks:
+        print(f"Overriding codebooks: {model.config.audio_num_codebooks} -> {audio_num_codebooks}")
+        model.config.audio_num_codebooks = audio_num_codebooks
 
     dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
 
@@ -780,7 +785,7 @@ def warmup_generator(gen: Generator, warmup_text: str = "Hello, this is a compre
     
     print("Maximum-intensity warmup complete. First generation should now be MUCH faster.")
 
-def load_csm_1b(device: str = "cuda") -> Generator:
+def load_csm_1b(device: str = "cuda", audio_num_codebooks: int = 16) -> Generator:
     """
     Load the CSM-1B model with extreme optimizations for real-time performance.
     """
@@ -797,6 +802,11 @@ def load_csm_1b(device: str = "cuda") -> Generator:
         torch.cuda.synchronize()
     
     model = Model.from_pretrained("sesame/csm-1b")
+    
+    # Override codebook count if different from model default
+    if model.config.audio_num_codebooks != audio_num_codebooks:
+        print(f"Overriding codebooks: {model.config.audio_num_codebooks} -> {audio_num_codebooks}")
+        model.config.audio_num_codebooks = audio_num_codebooks
     
     dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
     model.backbone = torch.compile(model.backbone,mode='reduce-overhead', fullgraph=True, backend='inductor')
