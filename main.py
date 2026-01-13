@@ -710,9 +710,6 @@ def audio_generation_thread(text, output_file):
             loop
         )
         
-        # Give client a moment to process
-        time.sleep(0.2)
-        
         logger.info(f"Sending generating status with ID {this_id}")
         asyncio.run_coroutine_threadsafe(
             message_queue.put({
@@ -722,9 +719,6 @@ def audio_generation_thread(text, output_file):
             }),
             loop
         )
-        
-        # Small delay to ensure client gets the signal
-        time.sleep(0.2)
         
         # Estimate audio length
         words = text.split()
@@ -814,8 +808,6 @@ def audio_generation_thread(text, output_file):
                         }),
                         loop
                     )
-                    # Small delay
-                    time.sleep(0.1)
                 
                 # Send chunk with generation ID
                 asyncio.run_coroutine_threadsafe(
