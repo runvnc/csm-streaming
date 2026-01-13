@@ -36,7 +36,7 @@ huggingface-cli login
 ### Windows Setup
 
 The `triton` package cannot be installed in Windows. Instead use `pip install triton-windows`.
-The realtime demo uses VLLM for inference speed. This is currently not supported for windows but you can try with https://github.com/SystemPanic/vllm-windows until support is added.
+The realtime demo uses the OpenAI API for LLM inference. Set `OPENAI_API_KEY` environment variable, or for local OpenAI-compatible servers (like llama.cpp, vllm serve, etc.), also set `OPENAI_BASE_URL`.
 
 ## Quickstart
 

@@ -1,30 +1,34 @@
 import re
+import os
 from typing import List, Dict, Any, Optional
-import torch
-from vllm import LLM, SamplingParams
+from openai import OpenAI
 
 class LLMInterface:
     def __init__(self, model_path: str, max_tokens: int = 8192, n_threads: int = 8, gpu_layers: int = -1):
-        """Initialize the LLM interface using VLLM with a given model.
+        """Initialize the LLM interface using OpenAI-compatible API.
         
         Args:
-            model_path (str): Path to the model or HuggingFace model name
+            model_path (str): Model name for OpenAI API, or model identifier for local server
             max_tokens (int, optional): Maximum context length. Defaults to 8192.
-            n_threads (int, optional): Number of CPU threads. Defaults to 8.
-            gpu_layers (int, optional): Not used in VLLM, maintained for API compatibility.
-        """
-        # VLLM configuration
-        self.llm = LLM(
-            model=model_path,
-            tensor_parallel_size=1,  # Adjust based on number of GPUs available
-            gpu_memory_utilization=0.6,
-            max_model_len=max_tokens,
-            swap_space=0,
-            trust_remote_code=True,
-            dtype=torch.float16,
-        )
+            n_threads (int, optional): Not used, maintained for API compatibility.
+            gpu_layers (int, optional): Not used, maintained for API compatibility.
         
-        # Store configuration for reference
+        Environment variables:
+            OPENAI_API_KEY: API key for OpenAI (required for OpenAI API)
+            OPENAI_BASE_URL: Base URL for OpenAI-compatible server (optional, for local servers)
+        """
+        # Get configuration from environment
+        api_key = os.environ.get("OPENAI_API_KEY", "sk-no-key-required")
+        base_url = os.environ.get("OPENAI_BASE_URL", None)
+        
+        # Initialize OpenAI client
+        if base_url:
+            self.client = OpenAI(api_key=api_key, base_url=base_url)
+        else:
+            self.client = OpenAI(api_key=api_key)
+        
+        # Store configuration
+        self.model = model_path
         self.config = {
             "model_path": model_path,
             "max_tokens": max_tokens,
@@ -61,46 +65,86 @@ class LLMInterface:
         Returns:
             str: The generated response
         """
-        # Format prompt following chat template structure
-        prompt = f"""<|start_header_id|>system<|end_header_id|>\n{system_prompt}<|eot_id|>
-        {conversation_history}
-        <|start_header_id|>user<|end_header_id|>\n{user_message}<|eot_id|>
-        <|start_header_id|>assistant<|end_header_id|>\n"""
+        # Build messages list
+        messages = [{"role": "system", "content": system_prompt}]
         
-        # Define sampling parameters (equivalent to the previous implementation)
-        sampling_params = SamplingParams(
-            temperature=1.0,
-            top_p=0.95,
-            max_tokens=100,
-            repetition_penalty=1.2,
-            top_k=200,
-            stop=["</s>", "<|endoftext|>", "<<USR>>", "<</USR>>", "<</SYS>>", 
-                  "<</USER>>", "<</ASSISTANT>>", "<|end_header_id|>", "<<ASSISTANT>>", 
-                  "<|eot_id|>", "<|im_end|>", "user:", "User:", "user :", "User :"]
-        )
+        # Parse conversation history if provided
+        if conversation_history:
+            # Try to parse the history format "User: ...\nAI: ..."
+            lines = conversation_history.strip().split('\n')
+            current_role = None
+            current_content = []
+            
+            for line in lines:
+                if line.startswith("User: "):
+                    if current_role and current_content:
+                        messages.append({"role": current_role, "content": '\n'.join(current_content)})
+                    current_role = "user"
+                    current_content = [line[6:]]  # Remove "User: " prefix
+                elif line.startswith("AI: "):
+                    if current_role and current_content:
+                        messages.append({"role": current_role, "content": '\n'.join(current_content)})
+                    current_role = "assistant"
+                    current_content = [line[4:]]  # Remove "AI: " prefix
+                elif current_role:
+                    current_content.append(line)
+            
+            # Add the last message if any
+            if current_role and current_content:
+                messages.append({"role": current_role, "content": '\n'.join(current_content)})
         
-        # Generate response using VLLM
-        outputs = self.llm.generate(prompt, sampling_params)
+        # Add the current user message
+        messages.append({"role": "user", "content": user_message})
         
-        # Extract and return the generated text
-        if outputs and len(outputs) > 0:
-            text = outputs[0].outputs[0].text
-            return self.trim_to_last_sentence(text)
-        return ""
+        # Define stop sequences
+        stop_sequences = ["user:", "User:", "user :", "User :"]
+        
+        try:
+            # Generate response using OpenAI API
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=1.0,
+                top_p=0.95,
+                max_tokens=100,
+                frequency_penalty=0.2,  # Similar effect to repetition_penalty
+                stop=stop_sequences
+            )
+            
+            # Extract and return the generated text
+            if response.choices and len(response.choices) > 0:
+                text = response.choices[0].message.content
+                if text:
+                    return self.trim_to_last_sentence(text)
+            return ""
+            
+        except Exception as e:
+            print(f"Error generating response: {e}")
+            return ""
     
     def tokenize(self, text: str) -> List[int]:
-        """Tokenize text using VLLM's tokenizer.
+        """Estimate tokenization (OpenAI doesn't expose tokenizer directly).
         
         Args:
             text (str): Text to tokenize
             
         Returns:
-            List[int]: List of token IDs
+            List[int]: Estimated list of token IDs (placeholder values)
         """
-        # VLLM doesn't expose tokenizer directly in the same way
-        # We can access the tokenizer through the LLM instance
-        tokenizer = self.llm.get_tokenizer()
-        return tokenizer.encode(text)
+        # Rough estimation: ~4 characters per token for English text
+        # This is a simplification; for accurate counts, use tiktoken
+        try:
+            import tiktoken
+            # Try to get encoding for the model, fall back to cl100k_base
+            try:
+                encoding = tiktoken.encoding_for_model(self.model)
+            except KeyError:
+                encoding = tiktoken.get_encoding("cl100k_base")
+            return encoding.encode(text)
+        except ImportError:
+            # Fallback: return placeholder token IDs based on character count
+            estimated_tokens = len(text) // 4 + 1
+            return list(range(estimated_tokens))
     
     def get_token_count(self, text: str) -> int:
         """Return token count of the input text.
@@ -126,42 +170,61 @@ class LLMInterface:
         Returns:
             List[str]: Generated responses
         """
-        formatted_prompts = []
+        results = []
+        stop_sequences = ["user:", "User:", "user :", "User :"]
         
-        # Format each prompt according to the chat template
         for p in prompts:
             system = p.get("system", "")
             user = p.get("user", "")
             history = p.get("history", "")
             
-            formatted_prompt = f"""<|start_header_id|>system<|end_header_id|>\n{system}<|eot_id|>
-            {history}
-            <|start_header_id|>user<|end_header_id|>\n{user}<|eot_id|>
-            <|start_header_id|>assistant<|end_header_id|>\n"""
+            # Build messages
+            messages = [{"role": "system", "content": system}]
             
-            formatted_prompts.append(formatted_prompt)
-        
-        # Set up batch sampling parameters
-        sampling_params = SamplingParams(
-            temperature=temperature,
-            top_p=0.95,
-            max_tokens=max_tokens,
-            repetition_penalty=1.2,
-            top_k=400,
-            stop=["</s>", "<|endoftext|>", "<<USR>>", "<</USR>>", "<</SYS>>", 
-                  "<</USER>>", "<</ASSISTANT>>", "<|end_header_id|>", "<<ASSISTANT>>", 
-                  "<|eot_id|>", "<|im_end|>", "user:", "User:", "user :", "User :"]
-        )
-        
-        # Generate responses for all prompts in a batch
-        outputs = self.llm.generate(formatted_prompts, sampling_params)
-        
-        # Extract and return the generated texts
-        results = []
-        for output in outputs:
-            if output.outputs:
-                results.append(output.outputs[0].text.strip())
-            else:
+            # Parse history if provided
+            if history:
+                lines = history.strip().split('\n')
+                current_role = None
+                current_content = []
+                
+                for line in lines:
+                    if line.startswith("User: "):
+                        if current_role and current_content:
+                            messages.append({"role": current_role, "content": '\n'.join(current_content)})
+                        current_role = "user"
+                        current_content = [line[6:]]
+                    elif line.startswith("AI: "):
+                        if current_role and current_content:
+                            messages.append({"role": current_role, "content": '\n'.join(current_content)})
+                        current_role = "assistant"
+                        current_content = [line[4:]]
+                    elif current_role:
+                        current_content.append(line)
+                
+                if current_role and current_content:
+                    messages.append({"role": current_role, "content": '\n'.join(current_content)})
+            
+            messages.append({"role": "user", "content": user})
+            
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=temperature,
+                    top_p=0.95,
+                    max_tokens=max_tokens,
+                    frequency_penalty=0.2,
+                    stop=stop_sequences
+                )
+                
+                if response.choices and len(response.choices) > 0:
+                    text = response.choices[0].message.content
+                    results.append(text.strip() if text else "")
+                else:
+                    results.append("")
+                    
+            except Exception as e:
+                print(f"Error in batch generation: {e}")
                 results.append("")
                 
         return results
