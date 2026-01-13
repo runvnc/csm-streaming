@@ -12,8 +12,12 @@ let reconnecting = false;
 let reconnectAttempts = 0;
 let maxReconnectAttempts = 10;
 
+// Scheduled playback state
+let nextScheduledTime = 0;
+let scheduledSources = [];
+
 const SESSION_ID = "default";
-console.log("chat.js loaded - optimized for low latency");
+console.log("chat.js loaded - gapless audio playback");
 
 let micStream;
 let selectedMicId = null;
@@ -202,7 +206,7 @@ function sendTextMessage(txt) {
     console.warn("Error sending interrupt:", e);
   }
   
-  // Send message immediately (no delay needed)
+  // Send message immediately
   try {
     showVoiceCircle();
     
@@ -231,17 +235,19 @@ function clearAudioPlayback() {
   audioPlaybackQueue = [];
   activeGenId = 0;
   
-  // Stop current audio source
-  if (currentAudioSource) {
+  // Stop all scheduled sources
+  for (const src of scheduledSources) {
     try {
-      currentAudioSource.disconnect();
-      currentAudioSource.stop(0);
+      src.stop(0);
+      src.disconnect();
     } catch (e) {
-      // Ignore errors - source may already be stopped
+      // Ignore - source may already be stopped
     }
-    currentAudioSource = null;
   }
+  scheduledSources = [];
+  nextScheduledTime = 0;
   
+  currentAudioSource = null;
   isAudioCurrentlyPlaying = false;
   hideVoiceCircle();
   
@@ -288,6 +294,8 @@ function handleWebSocketMessage(d) {
       interruptRequested = false;
       activeGenId = 0;
       audioPlaybackQueue = [];
+      scheduledSources = [];
+      nextScheduledTime = 0;
       
       // Ensure audio context is ready
       ensureAudioContext();
@@ -309,7 +317,7 @@ function handleWebSocketMessage(d) {
       
       // Only accept chunks from current generation
       if (chunkGenId === activeGenId) {
-        queueAudioForPlayback(d.audio, d.sample_rate, chunkGenId);
+        scheduleAudioChunk(d.audio, d.sample_rate, chunkGenId);
         showVoiceCircle();
       }
       break;
@@ -328,9 +336,8 @@ function handleWebSocketMessage(d) {
         if (!d.gen_id || d.gen_id === activeGenId) {
           activeGenId = 0;
         }
-        if (!isAudioCurrentlyPlaying && audioPlaybackQueue.length === 0) {
-          hideVoiceCircle();
-        }
+        // Don't hide circle yet - wait for audio to finish playing
+        checkPlaybackComplete();
       } 
       else if (d.status === 'interrupted') {
         clearAudioPlayback();
@@ -368,7 +375,8 @@ function ensureAudioContext() {
   }
 }
 
-function queueAudioForPlayback(arr, sr, genId) {
+// Schedule audio chunk for gapless playback
+function scheduleAudioChunk(arr, sampleRate, genId) {
   if (interruptRequested) {
     return;
   }
@@ -378,89 +386,88 @@ function queueAudioForPlayback(arr, sr, genId) {
     return;
   }
   
-  audioPlaybackQueue.push({arr, sr, genId});
+  ensureAudioContext();
   
-  if (!isAudioCurrentlyPlaying) {
-    processAudioPlaybackQueue();
-  }
-}
-
-function processAudioPlaybackQueue() {
-  if (interruptRequested || audioPlaybackQueue.length === 0) {
-    isAudioCurrentlyPlaying = false;
-    if (audioPlaybackQueue.length === 0) {
-      hideVoiceCircle();
+  try {
+    // Create audio buffer
+    const buf = audioContext.createBuffer(1, arr.length, sampleRate);
+    buf.copyToChannel(new Float32Array(arr), 0);
+    
+    // Create source node
+    const src = audioContext.createBufferSource();
+    src.buffer = buf;
+    
+    // Connect to destination
+    src.connect(audioContext.destination);
+    
+    // Calculate chunk duration
+    const chunkDuration = arr.length / sampleRate;
+    
+    // Determine start time
+    const now = audioContext.currentTime;
+    
+    // If this is the first chunk or we've fallen behind, start soon
+    // Add a tiny buffer (20ms) to prevent underrun
+    if (nextScheduledTime <= now) {
+      nextScheduledTime = now + 0.02;
     }
-    return;
-  }
-  
-  isAudioCurrentlyPlaying = true;
-  const {arr, sr, genId} = audioPlaybackQueue.shift();
-  
-  // Skip stale chunks
-  if (activeGenId !== 0 && genId !== activeGenId) {
-    processAudioPlaybackQueue();
-    return;
-  }
-  
-  playAudioChunk(arr, sr)
-    .then(() => {
-      if (!interruptRequested) {
-        processAudioPlaybackQueue();
-      } else {
+    
+    // Schedule this chunk
+    src.start(nextScheduledTime);
+    
+    // Track this source for potential interruption
+    scheduledSources.push(src);
+    
+    // Clean up old sources that have finished
+    src.onended = () => {
+      const idx = scheduledSources.indexOf(src);
+      if (idx > -1) {
+        scheduledSources.splice(idx, 1);
+      }
+      // Check if all audio is done
+      if (scheduledSources.length === 0 && activeGenId === 0) {
         isAudioCurrentlyPlaying = false;
         hideVoiceCircle();
       }
-    })
-    .catch(err => {
-      console.error("Audio playback error:", err);
-      isAudioCurrentlyPlaying = false;
-      // Try next chunk
-      if (audioPlaybackQueue.length > 0 && !interruptRequested) {
-        setTimeout(processAudioPlaybackQueue, 50);
-      }
-    });
+    };
+    
+    // Update next scheduled time for seamless playback
+    nextScheduledTime += chunkDuration;
+    
+    isAudioCurrentlyPlaying = true;
+    
+    // Animate voice circle
+    animateVoiceCircle(src, buf);
+    
+  } catch (error) {
+    console.error("Error scheduling audio chunk:", error);
+  }
 }
 
-async function playAudioChunk(audioArr, sampleRate) {
-  if (interruptRequested) {
-    return;
-  }
-  
-  ensureAudioContext();
-  
-  const buf = audioContext.createBuffer(1, audioArr.length, sampleRate);
-  buf.copyToChannel(new Float32Array(audioArr), 0);
-  
-  const src = audioContext.createBufferSource();
-  src.buffer = buf;
-  currentAudioSource = src;
-  
-  const analyser = audioContext.createAnalyser(); 
-  analyser.fftSize = 256;
-  src.connect(analyser); 
-  analyser.connect(audioContext.destination); 
-  src.start();
-
-  // Animate voice circle based on audio levels
-  const dataArray = new Uint8Array(analyser.frequencyBinCount);
+function animateVoiceCircle(src, buf) {
   const circle = document.getElementById('voice-circle');
+  if (!circle) return;
   
-  function animate() {
-    if (src !== currentAudioSource || interruptRequested) return;
-    
-    analyser.getByteFrequencyData(dataArray);
-    const avg = dataArray.reduce((a,b) => a+b, 0) / dataArray.length;
-    if (circle) {
-      circle.style.setProperty('--dynamic-scale', (1 + avg/255 * 1.5).toFixed(3));
-    }
-    requestAnimationFrame(animate);
+  // Simple animation based on buffer RMS
+  const data = buf.getChannelData(0);
+  let sum = 0;
+  for (let i = 0; i < data.length; i += 100) {
+    sum += data[i] * data[i];
   }
-  animate();
-  
-  return new Promise(resolve => {
-    src.onended = resolve;
-  });
+  const rms = Math.sqrt(sum / (data.length / 100));
+  const scale = 1 + rms * 3;
+  circle.style.setProperty('--dynamic-scale', scale.toFixed(3));
+}
+
+function checkPlaybackComplete() {
+  // Check periodically if all scheduled audio has finished
+  if (scheduledSources.length === 0) {
+    isAudioCurrentlyPlaying = false;
+    hideVoiceCircle();
+  } else {
+    // Check again in 100ms
+    setTimeout(checkPlaybackComplete, 100);
+  }
 }
 
 async function startRecording() {
@@ -588,7 +595,7 @@ async function setupChatUI() {
     }, {once: true})
   );
 
-  console.log("Chat UI ready - optimized for low latency");
+  console.log("Chat UI ready - gapless audio playback enabled");
 }
 
 if (document.readyState === 'loading') {

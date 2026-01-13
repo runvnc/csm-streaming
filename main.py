@@ -766,7 +766,7 @@ def audio_generation_thread(text, output_file):
                     break
                 
                 # Get result with timeout to allow checking interrupt
-                result = model_result_queue.get(timeout=0.1)
+                result = model_result_queue.get(timeout=0.02)
                 
                 # Check for end of generation or error
                 if result is None:
