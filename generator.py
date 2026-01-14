@@ -205,6 +205,8 @@ class Generator:
         max_audio_length_ms: float = 90_000,
         temperature: float = 0.9,
         topk: int = 0,
+        repetition_penalty: float = 1.2,
+        recent_tokens_window: int = 20,
         on_chunk_generated: Optional[Callable[[torch.Tensor], None]] = None,
     ):
         """
@@ -306,6 +308,9 @@ class Generator:
             last_sample = None
             repeat_count = 0
             max_repeats = 2  # Stop after this many consecutive identical frames
+            
+            # Track recent tokens for repetition penalty
+            recent_samples = []
 
             while i < max_generation_len:
                 batch_end = min(i + batch_size, max_generation_len)
@@ -316,7 +321,12 @@ class Generator:
                 for _ in range(batch_size_actual):
                     frame_start = time.time()
                     with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                        sample = self._model.generate_frame(curr_tokens, curr_tokens_mask, curr_pos, temperature, topk)
+                        # Build recent tokens tensor for repetition penalty
+                        if recent_samples and repetition_penalty != 1.0:
+                            recent_tokens = torch.stack(recent_samples[-recent_tokens_window:], dim=0)
+                        else:
+                            recent_tokens = None
+                        sample = self._model.generate_frame(curr_tokens, curr_tokens_mask, curr_pos, temperature, topk, recent_tokens, repetition_penalty)
                         if torch.cuda.is_available() and hasattr(torch, "cuda") and hasattr(torch.cuda, "is_available"):
                             try:
                                 torch.cuda.synchronize()  # Force sync before checking
@@ -341,6 +351,9 @@ class Generator:
                     else:
                         repeat_count = 0
                     last_sample = sample.clone()
+
+                    # Add to recent samples for repetition penalty
+                    recent_samples.append(sample.squeeze(0))
 
                     batch_samples.append(sample)
                     update_tokens(sample)
