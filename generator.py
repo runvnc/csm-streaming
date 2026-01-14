@@ -114,12 +114,10 @@ class Generator:
         # Limit to the number of codebooks set in MIMI
         audio_tokens = audio_tokens[:self._num_codebooks, :]
         
-        # EOS frame injection disabled - theory: adding zero frames at segment boundaries
-        # in context was teaching the model to output zeros/pauses at sentence boundaries
-        # (after periods). The model should still output zeros when truly done speaking,
-        # but won't have learned to pause at every punctuation mark.
-        # eos_frame = torch.zeros(audio_tokens.size(0), 1).to(self.device)
-        # audio_tokens = torch.cat([audio_tokens, eos_frame], dim=1)
+        # Re-enabled EOS frame - model needs these boundaries to know when segments end
+        # Disabling caused model to generate silence instead of completing sentences
+        eos_frame = torch.zeros(audio_tokens.size(0), 1).to(self.device)
+        audio_tokens = torch.cat([audio_tokens, eos_frame], dim=1)
 
         audio_frame = torch.zeros(audio_tokens.size(1), self._num_codebooks+1).long().to(self.device)
         audio_frame_mask = torch.zeros(audio_tokens.size(1), self._num_codebooks+1).bool().to(self.device)
