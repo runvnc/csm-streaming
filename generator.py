@@ -114,9 +114,12 @@ class Generator:
         # Limit to the number of codebooks set in MIMI
         audio_tokens = audio_tokens[:self._num_codebooks, :]
         
-        # add EOS frame
-        eos_frame = torch.zeros(audio_tokens.size(0), 1).to(self.device)
-        audio_tokens = torch.cat([audio_tokens, eos_frame], dim=1)
+        # EOS frame injection disabled - theory: adding zero frames at segment boundaries
+        # in context was teaching the model to output zeros/pauses at sentence boundaries
+        # (after periods). The model should still output zeros when truly done speaking,
+        # but won't have learned to pause at every punctuation mark.
+        # eos_frame = torch.zeros(audio_tokens.size(0), 1).to(self.device)
+        # audio_tokens = torch.cat([audio_tokens, eos_frame], dim=1)
 
         audio_frame = torch.zeros(audio_tokens.size(1), self._num_codebooks+1).long().to(self.device)
         audio_frame_mask = torch.zeros(audio_tokens.size(1), self._num_codebooks+1).bool().to(self.device)
@@ -299,6 +302,11 @@ class Generator:
             first_frame_time = None
             frame_times = []
             decode_times = []
+            
+            # Track consecutive identical frames (model stuck in loop)
+            last_sample = None
+            repeat_count = 0
+            max_repeats = 2  # Stop after this many consecutive identical frames
 
             while i < max_generation_len:
                 batch_end = min(i + batch_size, max_generation_len)
@@ -321,9 +329,21 @@ class Generator:
                                 break
                     if torch.all(sample == 0):
                         break
+                    
+                    # Check for repeated frames (model stuck in loop - causes silence/hangs)
+                    # Based on GitHub issue #122 feedback
+                    if last_sample is not None and torch.equal(sample, last_sample):
+                        repeat_count += 1
+                        if repeat_count >= max_repeats:
+                            logger.warning(f"[GENERATION] Detected {repeat_count} consecutive identical frames - model stuck, stopping early")
+                            break
+                    else:
+                        repeat_count = 0
+                    last_sample = sample.clone()
 
                     batch_samples.append(sample)
                     update_tokens(sample)
+                    
                     
                     frame_time = (time.time() - frame_start) * 1000
                     frame_times.append(frame_time)

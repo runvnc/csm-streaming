@@ -746,7 +746,7 @@ def audio_generation_thread(text, output_file):
             config.voice_speaker_id,
             reference_segments,
             max_audio_length_ms,
-            0.8,  # temperature
+            0.3,  # temperature - lower for more consistent output
             50    # topk
         ))
         
