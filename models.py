@@ -72,9 +72,14 @@ def _multinomial_sample_one_no_sync(probs):  # Does multinomial sampling without
 def sample_topk(logits: torch.Tensor, topk: int, temperature: float):
     logits = logits / temperature
 
-    filter_value: float = -float("Inf")
-    indices_to_remove = logits < torch.topk(logits, topk)[0][..., -1, None]
-    scores_processed = logits.masked_fill(indices_to_remove, filter_value)
+    if topk > 0:
+        filter_value: float = -float("Inf")
+        indices_to_remove = logits < torch.topk(logits, topk)[0][..., -1, None]
+        scores_processed = logits.masked_fill(indices_to_remove, filter_value)
+    else:
+        # topk disabled - use full distribution
+        scores_processed = logits
+    
     scores_processed = torch.nn.functional.log_softmax(scores_processed, dim=-1)
     probs = torch.nn.functional.softmax(scores_processed, dim=-1)
 

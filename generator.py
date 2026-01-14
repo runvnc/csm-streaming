@@ -203,8 +203,8 @@ class Generator:
         speaker: int,
         context: List[Segment],
         max_audio_length_ms: float = 90_000,
-        temperature: float = 0.7,
-        topk: int = 30,
+        temperature: float = 0.2,
+        topk: int = 0,
         on_chunk_generated: Optional[Callable[[torch.Tensor], None]] = None,
     ):
         """
@@ -468,8 +468,8 @@ class Generator:
         speaker: int,
         context: List[Segment],
         max_audio_length_ms: float = 90_000,
-        temperature: float = 0.8,
-        topk: int = 40,
+        temperature: float = 0.2,
+        topk: int = 0,
         stream: bool = False,
         output_file: Optional[str] = None,
     ):
@@ -805,7 +805,7 @@ def warmup_generator(gen: Generator, warmup_text: str = "Hello, this is a compre
         
         # Generate multiple frames with different parameters
         for temp in [0.6, 0.7, 0.8]:
-            for topk in [20, 30, 40]:
+            for topk in [0, 20, 30]:
                 _ = gen._model.generate_frame(dummy_tokens, dummy_mask, dummy_pos, temp, topk)
     
     gen._text_token_cache.clear()
