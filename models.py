@@ -69,7 +69,7 @@ def _multinomial_sample_one_no_sync(probs):  # Does multinomial sampling without
     q = torch.empty_like(probs).exponential_(1)
     return torch.argmax(probs / q, dim=-1, keepdim=True).to(dtype=torch.int)
 
-def sample_topk(logits: torch.Tensor, topk: int, temperature: float, recent_tokens: torch.Tensor = None, repetition_penalty: float = 1.2):
+def sample_topk(logits: torch.Tensor, topk: int, temperature: float, recent_tokens: torch.Tensor = None, repetition_penalty: float = 1.05):
     logits = logits / temperature
 
     if topk > 0:

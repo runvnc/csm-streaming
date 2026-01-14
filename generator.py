@@ -205,7 +205,7 @@ class Generator:
         max_audio_length_ms: float = 90_000,
         temperature: float = 0.9,
         topk: int = 0,
-        repetition_penalty: float = 1.2,
+        repetition_penalty: float = 1.05,
         recent_tokens_window: int = 20,
         on_chunk_generated: Optional[Callable[[torch.Tensor], None]] = None,
     ):
