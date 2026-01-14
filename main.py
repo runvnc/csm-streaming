@@ -669,9 +669,9 @@ def preprocess_text_for_tts(text):
     cleaned_text = re.sub(pattern, '', text)
     # Normalize multiple spaces to single space
     cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
-    # Fix periods/punctuation without spaces after them (e.g., 'word.word' -> 'word. word')
-    # This helps the model parse sentence boundaries correctly
-    cleaned_text = re.sub(r'([.,!?])([A-Za-z])', r'\1 \2', cleaned_text)
+    # Remove spaces after periods/punctuation (e.g., 'word. word' -> 'word.word')
+    # Testing if this helps with pause issues at sentence boundaries
+    cleaned_text = re.sub(r'([.,!?])\s+', r'\1', cleaned_text)
     return cleaned_text.strip()
 
 def audio_generation_thread(text, output_file):
