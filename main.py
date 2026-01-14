@@ -256,8 +256,9 @@ def initialize_models(config_data: CompanionConfig):
     if generator and reference_segments:
         logger.info(f"Pre-caching {len(reference_segments)} reference segments...")
         precache_start = time.time()
-        for segment in reference_segments:
-            generator._tokenize_segment(segment)
+        with torch.no_grad():
+            for segment in reference_segments:
+                generator._tokenize_segment(segment)
         precache_time = (time.time() - precache_start) * 1000
         logger.info(f"[PROFILE] Reference segments pre-cached in {precache_time:.0f}ms")
 
