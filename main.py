@@ -371,10 +371,11 @@ def process_user_input(user_text, session_id="default"):
     # Normal processing continues...
     logger.info(f"Processing user input: '{user_text}'")
     context = "\n".join([f"User: {msg['user']}\nAI: {msg['ai']}" for msg in conversation_history[-5:]])
-    rag_context = rag.query(user_text)
     system_prompt = config.system_prompt
-    if rag_context:
-        system_prompt += f"\n\nRelevant context:\n{rag_context}"
+    # RAG disabled for lower latency - conversation context is already in conversation_history
+    # rag_context = rag.query(user_text)
+    # if rag_context:
+    #     system_prompt += f"\n\nRelevant context:\n{rag_context}"
 
     # Notify clients that we're thinking
     asyncio.run_coroutine_threadsafe(
@@ -413,7 +414,8 @@ def process_user_input(user_text, session_id="default"):
         except Exception as e:
             logger.error(f"Database error: {e}")
         
-        threading.Thread(target=lambda: rag.add_conversation(user_text, ai_response), daemon=True).start()
+        # RAG disabled for lower latency
+        # threading.Thread(target=lambda: rag.add_conversation(user_text, ai_response), daemon=True).start()
         
         asyncio.run_coroutine_threadsafe(
             message_queue.put({"type": "audio_status", "status": "preparing"}),
