@@ -330,13 +330,15 @@ class Generator:
                     if torch.all(sample == 0):
                         break
                     
-                    # Check for repeated frames (model stuck in loop - causes silence/hangs)
-                    # Based on GitHub issue #122 feedback
+                    # Track repeated frames for logging (model stuck in loop - causes silence/hangs)
+                    # Based on GitHub issue #122 feedback - but don't stop, just log
                     if last_sample is not None and torch.equal(sample, last_sample):
                         repeat_count += 1
-                        if repeat_count >= max_repeats:
-                            logger.warning(f"[GENERATION] Detected {repeat_count} consecutive identical frames - model stuck, stopping early")
-                            break
+                        # Disabled stopping - was cutting off sentences prematurely
+                        # if repeat_count >= max_repeats:
+                        #     logger.warning(f"[GENERATION] Detected {repeat_count} consecutive identical frames - model stuck, stopping early")
+                        #     break
+                        pass
                     else:
                         repeat_count = 0
                     last_sample = sample.clone()
