@@ -68,6 +68,9 @@ class Generator:
         self.max_seq_len = 2048
         self._cache = OrderedDict()
         self._text_token_cache = {}
+        # Cache for segment tokenization (keyed by id(segment) or hash)
+        self._segment_token_cache = {}
+        
         torch.set_num_threads(16)
         torch.cuda.set_per_process_memory_fraction(0.95)
 
@@ -125,11 +128,33 @@ class Generator:
 
         return torch.cat(frame_tokens, dim=0), torch.cat(frame_masks, dim=0)
 
-    def _tokenize_segment(self, segment: Segment) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _tokenize_segment(self, segment: Segment, use_cache: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Tokenize a segment (text + audio). Uses caching to avoid re-tokenizing
+        segments that haven't changed.
+        
+        Cache key is based on segment's id() which is stable for the same object.
+        """
+        # Use object id as cache key - stable for same segment object
+        cache_key = id(segment)
+        
+        if use_cache and cache_key in self._segment_token_cache:
+            return self._segment_token_cache[cache_key]
+        
+        # Tokenize text and audio
         text_tokens, text_masks = self._tokenize_text_segment(segment.text, segment.speaker)
         audio_tokens, audio_masks = self._tokenize_audio(segment.audio)
 
         total_len = text_tokens.size(0) + audio_tokens.size(0)
+        
+        # Store in cache before any truncation (we want full tokenization cached)
+        # But only if not truncated - truncated segments shouldn't be cached
+        # as the truncation depends on context
+        if total_len <= self.max_seq_len and use_cache:
+            self._segment_token_cache[cache_key] = (
+                torch.cat([text_tokens, audio_tokens], dim=0),
+                torch.cat([text_masks, audio_masks], dim=0)
+            )
 
         if total_len > self.max_seq_len:
             overflow = total_len - self.max_seq_len
@@ -145,6 +170,18 @@ class Generator:
                 audio_masks = audio_masks[audio_overflow:]
 
         return torch.cat([text_tokens, audio_tokens], dim=0), torch.cat([text_masks, audio_masks], dim=0)
+    
+    def clear_segment_cache(self):
+        """Clear the segment tokenization cache."""
+        self._segment_token_cache.clear()
+        logger.info("[PROFILE] Segment cache cleared")
+    
+    def get_cache_stats(self):
+        """Get cache statistics."""
+        return {
+            "segment_cache_size": len(self._segment_token_cache),
+            "text_token_cache_size": len(self._text_token_cache)
+        }
 
     @torch.inference_mode()
     def _decode_frames(self, frames):
@@ -199,13 +236,21 @@ class Generator:
 
         # === PROFILING: Context tokenization ===
         context_tok_start = time.time()
+        cache_hits = 0
+        cache_misses = 0
         if context:
             for segment in context:
+                cache_key = id(segment)
+                was_cached = cache_key in self._segment_token_cache
                 segment_tokens, segment_tokens_mask = self._tokenize_segment(segment)
                 tokens.append(segment_tokens)
                 tokens_mask.append(segment_tokens_mask)
+                if was_cached:
+                    cache_hits += 1
+                else:
+                    cache_misses += 1
         context_tok_time = (time.time() - context_tok_start) * 1000
-        logger.info(f"[PROFILE] Context tokenization: {context_tok_time:.1f}ms ({len(context)} segments)")
+        logger.info(f"[PROFILE] Context tokenization: {context_tok_time:.1f}ms ({len(context)} segments, {cache_hits} cached, {cache_misses} new)")
 
         # === PROFILING: Text tokenization ===
         text_tok_start = time.time()
