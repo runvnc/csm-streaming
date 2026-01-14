@@ -203,7 +203,7 @@ class Generator:
         speaker: int,
         context: List[Segment],
         max_audio_length_ms: float = 90_000,
-        temperature: float = 0.2,
+        temperature: float = 0.9,
         topk: int = 0,
         on_chunk_generated: Optional[Callable[[torch.Tensor], None]] = None,
     ):
@@ -468,7 +468,7 @@ class Generator:
         speaker: int,
         context: List[Segment],
         max_audio_length_ms: float = 90_000,
-        temperature: float = 0.2,
+        temperature: float = 0.9,
         topk: int = 0,
         stream: bool = False,
         output_file: Optional[str] = None,
