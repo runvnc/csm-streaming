@@ -666,10 +666,11 @@ def preprocess_text_for_tts(text):
     pattern = r'[^\w\s.,!?\']'
     # Replace matched punctuation with empty string
     cleaned_text = re.sub(pattern, '', text)
-    # normalize multiple spaces to single space
+    # Normalize multiple spaces to single space
     cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
-    # ensure there's a space after punctuation for better speech pacing
-    cleaned_text = re.sub(r'([.,!?])(\S)', r'\1 \2', cleaned_text)
+    # Removed: adding space after punctuation was causing prosody issues
+    # The model handles punctuation spacing naturally from training data
+    # cleaned_text = re.sub(r'([.,!?])(\S)', r'\1 \2', cleaned_text)
     return cleaned_text.strip()
 
 def audio_generation_thread(text, output_file):

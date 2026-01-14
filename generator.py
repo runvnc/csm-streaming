@@ -133,10 +133,12 @@ class Generator:
         Tokenize a segment (text + audio). Uses caching to avoid re-tokenizing
         segments that haven't changed.
         
-        Cache key is based on segment's id() which is stable for the same object.
+        Cache key is based on content hash for stability across object recreation.
         """
-        # Use object id as cache key - stable for same segment object
-        cache_key = id(segment)
+        # Use content-based hash instead of id() to avoid stale cache issues
+        # when segments are recreated with the same content
+        audio_id = segment.audio.data_ptr() if segment.audio is not None else None
+        cache_key = (segment.speaker, segment.text, audio_id)
         
         if use_cache and cache_key in self._segment_token_cache:
             return self._segment_token_cache[cache_key]
@@ -188,9 +190,8 @@ class Generator:
         if not frames:
             return torch.tensor([])
         
-        # Only use first N codebooks for faster decoding
-        frames_reduced = [frame[:, :self._num_codebooks//2] for frame in frames]
-        audio = self._audio_tokenizer.decode(torch.stack(frames_reduced).permute(1, 2, 0)).squeeze(0).squeeze(0)
+        # Use all codebooks for better audio quality
+        audio = self._audio_tokenizer.decode(torch.stack(frames).permute(1, 2, 0)).squeeze(0).squeeze(0)
         return audio
 
     @torch.inference_mode()
@@ -240,7 +241,9 @@ class Generator:
         cache_misses = 0
         if context:
             for segment in context:
-                cache_key = id(segment)
+                # Use same content-based cache key as _tokenize_segment
+                audio_id = segment.audio.data_ptr() if segment.audio is not None else None
+                cache_key = (segment.speaker, segment.text, audio_id)
                 was_cached = cache_key in self._segment_token_cache
                 segment_tokens, segment_tokens_mask = self._tokenize_segment(segment)
                 tokens.append(segment_tokens)
