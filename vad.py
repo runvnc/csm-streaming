@@ -122,7 +122,7 @@ class AudioStreamProcessor:
             utils=utils,
             sample_rate=sample_rate,
             threshold=vad_threshold,
-            silence_duration=45  # Increased for better end detection
+            silence_duration=20  # ~640ms of silence before end-of-turn
         )
         
         self.audio_buffer = []
