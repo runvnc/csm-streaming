@@ -251,6 +251,15 @@ def initialize_models(config_data: CompanionConfig):
             break
 
     logger.info(f"Voice model ready in {time.time() - t0:.1f}s")
+    
+    # Pre-cache reference segment tokenization
+    if generator and reference_segments:
+        logger.info(f"Pre-caching {len(reference_segments)} reference segments...")
+        precache_start = time.time()
+        for segment in reference_segments:
+            generator._tokenize_segment(segment)
+        precache_time = (time.time() - precache_start) * 1000
+        logger.info(f"[PROFILE] Reference segments pre-cached in {precache_time:.0f}ms")
 
 
 def on_speech_start():
