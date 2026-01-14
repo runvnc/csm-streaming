@@ -203,8 +203,9 @@ class Generator:
         speaker: int,
         context: List[Segment],
         max_audio_length_ms: float = 90_000,
-        temperature: float = 0.8,
-        topk: int = 0,
+        temperature: float = 0.85,
+        topk: int = 80,
+        frequency_penalty: float = 0.02,
         on_chunk_generated: Optional[Callable[[torch.Tensor], None]] = None,
     ):
         """
@@ -306,6 +307,10 @@ class Generator:
             last_sample = None
             repeat_count = 0
             max_repeats = 2  # Stop after this many consecutive identical frames
+            
+            # Track token counts per codebook for frequency penalty
+            token_counts = {i: torch.zeros(self._model.config.audio_vocab_size, device=self.device) 
+                           for i in range(self._num_codebooks)}
 
             while i < max_generation_len:
                 batch_end = min(i + batch_size, max_generation_len)
@@ -316,7 +321,7 @@ class Generator:
                 for _ in range(batch_size_actual):
                     frame_start = time.time()
                     with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                        sample = self._model.generate_frame(curr_tokens, curr_tokens_mask, curr_pos, temperature, topk)
+                        sample = self._model.generate_frame(curr_tokens, curr_tokens_mask, curr_pos, temperature, topk, token_counts, frequency_penalty)
                         if torch.cuda.is_available() and hasattr(torch, "cuda") and hasattr(torch.cuda, "is_available"):
                             try:
                                 torch.cuda.synchronize()  # Force sync before checking
@@ -341,6 +346,11 @@ class Generator:
                     else:
                         repeat_count = 0
                     last_sample = sample.clone()
+
+                    # Update token counts for frequency penalty
+                    for cb_idx in range(sample.size(1)):
+                        token_id = sample[0, cb_idx].item()
+                        token_counts[cb_idx][token_id] += 1
 
                     batch_samples.append(sample)
                     update_tokens(sample)

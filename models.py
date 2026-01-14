@@ -69,7 +69,7 @@ def _multinomial_sample_one_no_sync(probs):  # Does multinomial sampling without
     q = torch.empty_like(probs).exponential_(1)
     return torch.argmax(probs / q, dim=-1, keepdim=True).to(dtype=torch.int)
 
-def sample_topk(logits: torch.Tensor, topk: int, temperature: float, recent_tokens: torch.Tensor = None, repetition_penalty: float = 1.05):
+def sample_topk(logits: torch.Tensor, topk: int, temperature: float, token_counts: torch.Tensor = None, frequency_penalty: float = 0.02):
     logits = logits / temperature
 
     if topk > 0:
@@ -80,11 +80,11 @@ def sample_topk(logits: torch.Tensor, topk: int, temperature: float, recent_toke
         # topk disabled - use full distribution
         scores_processed = logits
     
-    # Apply repetition penalty to recently generated tokens
-    if recent_tokens is not None and recent_tokens.numel() > 0 and repetition_penalty != 1.0:
-        for token in recent_tokens.flatten().unique():
-            if token < scores_processed.size(-1):
-                scores_processed[..., token] = scores_processed[..., token] / repetition_penalty
+    # Apply frequency penalty - subtract penalty * count from logits
+    # This discourages tokens proportionally to how often they've been used
+    if token_counts is not None and token_counts.numel() > 0 and frequency_penalty != 0.0:
+        # token_counts should be same shape as logits vocab dimension
+        scores_processed = scores_processed - (frequency_penalty * token_counts)
     
     scores_processed = torch.nn.functional.log_softmax(scores_processed, dim=-1)
     probs = torch.nn.functional.softmax(scores_processed, dim=-1)
@@ -141,8 +141,8 @@ class Model(
         input_pos: torch.Tensor,
         temperature: float,
         topk: int,
-        recent_tokens: torch.Tensor = None,
-        repetition_penalty: float = 1.2,
+        token_counts: dict = None,
+        frequency_penalty: float = 0.02,
     ) -> torch.Tensor:
         """
         Args:
@@ -151,8 +151,8 @@ class Model(
             input_pos: (batch_size, seq_len) positions for each token
             temperature: sampling temperature
             topk: top-k sampling parameter
-            recent_tokens: (num_recent_frames, audio_num_codebooks) recent tokens for repetition penalty
-            repetition_penalty: penalty factor for recent tokens (1.0 = no penalty)
+            token_counts: dict mapping codebook index to token count tensor
+            frequency_penalty: penalty factor per token occurrence (0.0 = no penalty)
 
         Returns:
             (batch_size, audio_num_codebooks) sampled tokens
@@ -169,9 +169,9 @@ class Model(
 
         last_h = h[:, -1, :]
         c0_logits = self.codebook0_head(last_h)
-        # Get recent tokens for codebook 0
-        c0_recent = recent_tokens[:, 0] if recent_tokens is not None and recent_tokens.numel() > 0 else None
-        c0_sample = sample_topk(c0_logits, topk, temperature, c0_recent, repetition_penalty)
+        # Get token counts for codebook 0
+        c0_counts = token_counts.get(0) if token_counts is not None else None
+        c0_sample = sample_topk(c0_logits, topk, temperature, c0_counts, frequency_penalty)
         c0_embed = self._embed_audio(0, c0_sample)
 
         curr_h = torch.cat([last_h.unsqueeze(1), c0_embed], dim=1)
@@ -186,9 +186,9 @@ class Model(
                 dtype=dtype
             )
             ci_logits = torch.mm(decoder_h[:, -1, :], self.audio_head[i - 1])
-            # Get recent tokens for this codebook
-            ci_recent = recent_tokens[:, i] if recent_tokens is not None and recent_tokens.numel() > 0 else None
-            ci_sample = sample_topk(ci_logits, topk, temperature, ci_recent, repetition_penalty)
+            # Get token counts for this codebook
+            ci_counts = token_counts.get(i) if token_counts is not None else None
+            ci_sample = sample_topk(ci_logits, topk, temperature, ci_counts, frequency_penalty)
             ci_embed = self._embed_audio(i, ci_sample)
 
             curr_h = ci_embed
