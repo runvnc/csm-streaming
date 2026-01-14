@@ -422,22 +422,16 @@ def process_user_input(user_text, session_id="default"):
             loop
         )
         
-        # Small delay to ensure client is ready
-        time.sleep(0.2)
-        
         # Send the response to clients
         asyncio.run_coroutine_threadsafe(
             message_queue.put({"type": "response", "text": ai_response}),
             loop
         )
-
-        time.sleep(0.5)
         
         if is_speaking:
             logger.warning("Still speaking when trying to start new audio - forcing interrupt")
             interrupt_flag.set()
             is_speaking = False
-            time.sleep(0.5)  # Give time for cleanup
         
         interrupt_flag.clear()  # Make absolutely sure
         is_speaking = False    # Reset for audio thread to take over
