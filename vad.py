@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from typing import Callable, Dict, List
+import time
 from collections import deque
 class VoiceActivityDetector:
     def __init__(
@@ -9,7 +10,7 @@ class VoiceActivityDetector:
         utils,
         sample_rate: int = 16000,
         threshold: float = 0.3,
-        silence_duration: int = 45
+        silence_duration: int = 20
     ):
         self.model = model
         self.sample_rate = sample_rate
@@ -95,6 +96,8 @@ class VoiceActivityDetector:
         
         return turn_ended
 
+import logging
+logger = logging.getLogger(__name__)
 
 class AudioStreamProcessor:
     def __init__(
@@ -126,9 +129,12 @@ class AudioStreamProcessor:
         self.is_collecting = False
         self.callbacks = callbacks or {}
         self.silent_chunk_count = 0
-        self.max_silent_chunks = 30  # Force end after this many silent chunks
+        self.max_silent_chunks = 15  # Force end after this many silent chunks
         
         print(f"AudioStreamProcessor initialized with threshold: {vad_threshold}")
+        
+        # Profiling
+        self.speech_start_time = None
     
     def process_audio(self, audio_chunk: np.ndarray):
         # Always add to pre-speech buffer
@@ -137,8 +143,13 @@ class AudioStreamProcessor:
         if self.is_collecting:
             self.audio_buffer.append(audio_chunk)
         
-        # Process with VAD
+        # Process with VAD - measure time
+        vad_start = time.perf_counter()
         is_turn_end = self.vad.process_audio_chunk(audio_chunk)
+        vad_time = (time.perf_counter() - vad_start) * 1000
+        # Only log if VAD takes unusually long (>10ms)
+        if vad_time > 10:
+            logger.warning(f"[PROFILE] VAD processing took {vad_time:.1f}ms")
         
         # Start collecting on speech detection
         if self.vad.is_speaking and not self.is_collecting:
@@ -146,46 +157,49 @@ class AudioStreamProcessor:
             self.silent_chunk_count = 0
             # Include pre-speech buffer in the audio buffer
             self.audio_buffer = list(self.pre_speech_buffer)
-            print(f"Speech started, beginning collection with {len(self.pre_speech_buffer)} pre-speech chunks")
+            self.speech_start_time = time.perf_counter()
+            logger.info(f"[PROFILE] Speech started, collecting with {len(self.pre_speech_buffer)} pre-speech chunks")
             if "on_speech_start" in self.callbacks:
                 self.callbacks["on_speech_start"]()
         
         # Count silent chunks when collecting but not speaking
         if self.is_collecting and not self.vad.is_speaking:
             self.silent_chunk_count += 1
-            print(f"Silent chunk count: {self.silent_chunk_count}, max: {self.max_silent_chunks}")
             # Force end after too many silent chunks
             if self.silent_chunk_count >= self.max_silent_chunks:
                 is_turn_end = True
-                print(f"Forcing speech end after {self.silent_chunk_count} silent chunks")
+                logger.info(f"[PROFILE] Forcing speech end after {self.silent_chunk_count} silent chunks")
         else:
             self.silent_chunk_count = 0
                 
         # End collection on turn end
         if is_turn_end and self.is_collecting:
-            print("Turn end detected, processing collected audio")
+            turn_detect_time = (time.perf_counter() - self.speech_start_time) * 1000 if self.speech_start_time else 0
+            logger.info(f"[PROFILE] Turn end detected after {turn_detect_time:.0f}ms of speech")
             self.is_collecting = False
             if self.audio_buffer:
-                print(f"Audio buffer length: {len(self.audio_buffer)} chunks")
-                print("Speech ended, processing collected audio")
                 complete_audio = np.concatenate(self.audio_buffer)
-                print(f"Complete audio length: {len(complete_audio)}")
+                audio_duration = len(complete_audio) / self.sample_rate
+                logger.info(f"[PROFILE] Speech ended: {audio_duration:.2f}s of audio in {len(self.audio_buffer)} chunks")
                 
                 if "on_speech_end" in self.callbacks:
                     try:
-                        print("Calling on_speech_end callback")
+                        callback_start = time.perf_counter()
                         self.callbacks["on_speech_end"](complete_audio, self.sample_rate)
-                        print("on_speech_end callback completed successfully")
+                        callback_time = (time.perf_counter() - callback_start) * 1000
+                        logger.info(f"[PROFILE] on_speech_end callback took {callback_time:.0f}ms")
                     except Exception as e:
-                        print(f"Error in on_speech_end callback: {e}")
+                        logger.error(f"Error in on_speech_end callback: {e}")
                 
                 # Clear buffer after processing
                 self.audio_buffer = []
                 self.silent_chunk_count = 0
+                self.speech_start_time = None
     
     def reset(self):
         self.vad.reset()
         self.audio_buffer = []
         self.is_collecting = False
         self.silent_chunk_count = 0
-        print("AudioStreamProcessor reset")
+        self.speech_start_time = None
+        logger.info("[PROFILE] AudioStreamProcessor reset")

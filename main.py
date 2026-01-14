@@ -184,6 +184,7 @@ def load_reference_segments(config_data: CompanionConfig):
 
 def transcribe_audio(audio_data, sample_rate):
     global whisper_model
+    transcribe_start = time.time()
     audio_np = np.array(audio_data).astype(np.float32)
     if sample_rate != 16000:
         try:
@@ -193,9 +194,13 @@ def transcribe_audio(audio_data, sample_rate):
         except: pass
     try:
         with torch.jit.optimized_execution(False):
-            result = whisper_pipe(audio_np, generate_kwargs={"language": "english"}) 
+            result = whisper_pipe(audio_np, generate_kwargs={"language": "english"})
+            transcribe_time = (time.time() - transcribe_start) * 1000
+            audio_duration = len(audio_np) / 16000
+            logger.info(f"[PROFILE] Transcription: {transcribe_time:.0f}ms for {audio_duration:.2f}s audio (RTF: {transcribe_time/1000/audio_duration:.2f}x)")
             return result["text"]
     except:
+        logger.error(f"[PROFILE] Transcription failed after {(time.time() - transcribe_start)*1000:.0f}ms")
         return "[Transcription error]"
 
 def initialize_models(config_data: CompanionConfig):
