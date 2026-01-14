@@ -669,9 +669,9 @@ def preprocess_text_for_tts(text):
     cleaned_text = re.sub(pattern, '', text)
     # Normalize multiple spaces to single space
     cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
-    # Removed: adding space after punctuation was causing prosody issues
-    # The model handles punctuation spacing naturally from training data
-    # cleaned_text = re.sub(r'([.,!?])(\S)', r'\1 \2', cleaned_text)
+    # Fix periods/punctuation without spaces after them (e.g., 'word.word' -> 'word. word')
+    # This helps the model parse sentence boundaries correctly
+    cleaned_text = re.sub(r'([.,!?])([A-Za-z])', r'\1 \2', cleaned_text)
     return cleaned_text.strip()
 
 def audio_generation_thread(text, output_file):
@@ -747,7 +747,7 @@ def audio_generation_thread(text, output_file):
             config.voice_speaker_id,
             reference_segments,
             max_audio_length_ms,
-            0.3,  # temperature - lower for more consistent output
+            0.5,  # temperature
             50    # topk
         ))
         

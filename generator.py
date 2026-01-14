@@ -191,8 +191,9 @@ class Generator:
         if not frames:
             return torch.tensor([])
         
-        # Use all codebooks for better audio quality
-        audio = self._audio_tokenizer.decode(torch.stack(frames).permute(1, 2, 0)).squeeze(0).squeeze(0)
+        # Use half codebooks for faster decoding (reverted - full codebooks was causing issues)
+        frames_reduced = [frame[:, :self._num_codebooks//2] for frame in frames]
+        audio = self._audio_tokenizer.decode(torch.stack(frames_reduced).permute(1, 2, 0)).squeeze(0).squeeze(0)
         return audio
 
     @torch.inference_mode()
