@@ -288,8 +288,11 @@ def on_speech_end(audio_data, sample_rate):
         os.makedirs(os.path.dirname(user_audio_path), exist_ok=True)
 
         audio_tensor = torch.tensor(audio_data).unsqueeze(0)
+        audio_for_context = audio_tensor.squeeze(0)
+        # Trim silence from user audio before adding to context
+        audio_for_context = trim_silence(audio_for_context, sample_rate=sample_rate)
         save_audio_and_trim(user_audio_path, session_id, speaker_id, audio_tensor.squeeze(0), sample_rate)
-        add_segment(user_text, speaker_id, audio_tensor.squeeze(0))
+        add_segment(user_text, speaker_id, audio_for_context)
 
         logger.info(f"User audio saved and segment appended: {user_audio_path}")
 
@@ -562,6 +565,69 @@ def save_audio_and_trim(path, session_id, speaker_id, tensor, sample_rate):
                 logger.info(f"Removed old audio file from other speaker: {old_path}")
 
 # Reduced from 8 to 4 - longer context was causing model to generate silence
+# Then reduced to 2 for even more minimal context
+
+def trim_silence(audio_tensor, sample_rate=24000, threshold_db=-40, min_silence_duration=0.1):
+    """
+    Trim leading and trailing silence from audio tensor.
+    
+    Args:
+        audio_tensor: 1D torch tensor of audio samples
+        sample_rate: Audio sample rate
+        threshold_db: Silence threshold in dB (default -40dB)
+        min_silence_duration: Minimum silence duration to trim (seconds)
+    
+    Returns:
+        Trimmed audio tensor
+    """
+    if audio_tensor.numel() == 0:
+        return audio_tensor
+    
+    # Convert to numpy for easier processing
+    audio_np = audio_tensor.cpu().numpy() if audio_tensor.is_cuda else audio_tensor.numpy()
+    
+    # Calculate energy in small windows
+    window_size = int(sample_rate * 0.02)  # 20ms windows
+    threshold_linear = 10 ** (threshold_db / 20)
+    
+    # Find first and last non-silent windows
+    num_windows = len(audio_np) // window_size
+    if num_windows == 0:
+        return audio_tensor
+    
+    # Calculate RMS for each window
+    start_idx = 0
+    end_idx = len(audio_np)
+    
+    for i in range(num_windows):
+        window = audio_np[i * window_size:(i + 1) * window_size]
+        rms = np.sqrt(np.mean(window ** 2))
+        if rms > threshold_linear:
+            start_idx = i * window_size
+            break
+    
+    for i in range(num_windows - 1, -1, -1):
+        window = audio_np[i * window_size:(i + 1) * window_size]
+        rms = np.sqrt(np.mean(window ** 2))
+        if rms > threshold_linear:
+            end_idx = (i + 1) * window_size
+            break
+    
+    # Add small padding to avoid cutting off speech
+    padding_samples = int(sample_rate * 0.05)  # 50ms padding
+    start_idx = max(0, start_idx - padding_samples)
+    end_idx = min(len(audio_np), end_idx + padding_samples)
+    
+    trimmed = audio_np[start_idx:end_idx]
+    
+    # Log trimming info
+    original_duration = len(audio_np) / sample_rate
+    trimmed_duration = len(trimmed) / sample_rate
+    if original_duration - trimmed_duration > 0.1:
+        logger.info(f"[SILENCE TRIM] Trimmed {original_duration:.2f}s -> {trimmed_duration:.2f}s (removed {original_duration - trimmed_duration:.2f}s)")
+    
+    return torch.tensor(trimmed, device=audio_tensor.device, dtype=audio_tensor.dtype)
+
 MAX_SEGMENTS = 2
 
 def add_segment(text, speaker_id, audio_tensor):
@@ -844,8 +910,11 @@ def audio_generation_thread(text, output_file):
         if all_audio_chunks and not interrupt_flag.is_set():
             try:
                 complete_audio = torch.cat(all_audio_chunks)
+                # Trim silence from AI audio before adding to context
+                audio_for_context = trim_silence(complete_audio, sample_rate=generator.sample_rate)
+                # Save full audio to file, but use trimmed audio for context
                 save_audio_and_trim(output_file, "default", config.voice_speaker_id, complete_audio, generator.sample_rate)
-                add_segment(text.lower(), config.voice_speaker_id, complete_audio)
+                add_segment(text.lower(), config.voice_speaker_id, audio_for_context)
                 
                 # Log statistics
                 total_time = time.time() - generation_start
