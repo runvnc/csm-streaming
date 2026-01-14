@@ -104,10 +104,8 @@ class LLMInterface:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                temperature=1.0,
-                top_p=0.95,
+                temperature=0,
                 max_tokens=100,
-                frequency_penalty=0.2,  # Similar effect to repetition_penalty
                 stop=stop_sequences
             )
             
