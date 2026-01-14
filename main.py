@@ -561,7 +561,8 @@ def save_audio_and_trim(path, session_id, speaker_id, tensor, sample_rate):
                 os.remove(old_path)
                 logger.info(f"Removed old audio file from other speaker: {old_path}")
 
-MAX_SEGMENTS = 8
+# Reduced from 8 to 4 - longer context was causing model to generate silence
+MAX_SEGMENTS = 4
 
 def add_segment(text, speaker_id, audio_tensor):
     """
