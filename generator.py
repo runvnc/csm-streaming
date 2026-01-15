@@ -316,18 +316,16 @@ class Generator:
             # Problem: sometimes the model emits all-zero frames (treated as EOS) too early,
             # cutting off mid-sentence or yielding long silence.
             # Strategy:
-            #   1) Require multiple consecutive EOS frames before stopping.
+            #   1) Do NOT stop on EOS (all-zero frames). Instead, try to resample away from it.
             #   2) If we see near-silent decoded audio for ~1s+, temporarily discourage token 0.
             words = max(1, len(text.split()))
             min_audio_ms = max(400, min(2500, int(words * 180)))  # ~180ms/word, clamped
             min_required_frames = int(min_audio_ms / 80)
-            eos_patience_frames = 6  # require ~480ms worth of EOS frames before stopping
             consecutive_eos_frames = 0
             silence_rms_threshold = 1.0e-4
             silent_chunk_streak = 0
             silent_run_ms = 0.0
             logged_silence_nudge = False
-            stop_generation = False
 
             while i < max_generation_len:
                 batch_end = min(i + batch_size, max_generation_len)
@@ -361,30 +359,31 @@ class Generator:
                     if torch.all(sample == 0):
                         consecutive_eos_frames += 1
 
-                        # If EOS happens too early or after a long silent run, discourage token 0 and re-sample.
-                        if (i < min_required_frames) or (silent_run_ms >= 1000 and i < (max_generation_len - 8)):
-                            # Heavily penalize token 0 via frequency penalty counts.
-                            for cb_idx in range(self._num_codebooks):
-                                token_counts[cb_idx][0] += 200
+                        # We do NOT stop on persistent EOS (user request). Instead:
+                        # - Heavily penalize token 0 via frequency penalty counts.
+                        # - Try a few resamples with higher temp/topk.
+                        for cb_idx in range(self._num_codebooks):
+                            token_counts[cb_idx][0] += 250
 
+                        # Try harder if EOS is early OR we've been near-silent for a while.
+                        hard_mode = (i < min_required_frames) or (silent_run_ms >= 1000.0)
+                        attempts = 5 if hard_mode else 2
+
+                        for _attempt in range(attempts):
                             with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                                 resample = self._model.generate_frame(
                                     curr_tokens,
                                     curr_tokens_mask,
                                     curr_pos,
-                                    min(1.3, effective_temperature + 0.15),
-                                    max(effective_topk, 120),
+                                    min(1.3, effective_temperature + (0.25 if hard_mode else 0.10)),
+                                    max(effective_topk, (140 if hard_mode else 110)),
                                     token_counts,
                                     frequency_penalty,
                                 )
                             if not torch.all(resample == 0):
                                 sample = resample
                                 consecutive_eos_frames = 0
-
-                        # Only stop if EOS persists and we've generated some minimal amount of audio.
-                        if (i >= min_required_frames) and (consecutive_eos_frames >= eos_patience_frames):
-                            stop_generation = True
-                            break
+                                break
                     else:
                         consecutive_eos_frames = 0
                     
@@ -415,17 +414,9 @@ class Generator:
                     
                     if first_frame_time is None:
                         first_frame_time = (time.time() - generation_start) * 1000
-                        logger.info(f\"[PROFILE] First frame generated: {first_frame_time:.1f}ms\")
-
-                    if stop_generation:
-                        break
                         logger.info(f"[PROFILE] First frame generated: {first_frame_time:.1f}ms")
 
                 if not batch_samples:
-                    break
-
-                if stop_generation:
-                    # We'll fall through to flush any buffered audio below.
                     break
 
                 frame_buffer.extend(batch_samples)
@@ -485,10 +476,6 @@ class Generator:
                         first_chunk_total = (time.time() - profile_start) * 1000
                         chunk_samples = len(cpu_chunk)
                         chunk_duration_ms = (chunk_samples / self.sample_rate) * 1000
-                        logger.info(f\"[PROFILE] === FIRST CHUNK DELIVERED ===\")
-                        logger.info(f\"[PROFILE] First chunk latency (total): {first_chunk_total:.1f}ms\")
-                        logger.info(f\"[PROFILE] First chunk size: {chunk_samples} samples ({chunk_duration_ms:.1f}ms audio)\")
-                        logger.info(f\"[PROFILE] Decode time for first chunk: {decode_time:.1f}ms\")
                         logger.info(f"[PROFILE] === FIRST CHUNK DELIVERED ===")
                         logger.info(f"[PROFILE] First chunk latency (total): {first_chunk_total:.1f}ms")
                         logger.info(f"[PROFILE] First chunk size: {chunk_samples} samples ({chunk_duration_ms:.1f}ms audio)")
