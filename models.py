@@ -69,7 +69,7 @@ def _multinomial_sample_one_no_sync(probs):  # Does multinomial sampling without
     q = torch.empty_like(probs).exponential_(1)
     return torch.argmax(probs / q, dim=-1, keepdim=True).to(dtype=torch.int)
 
-def sample_topk(logits: torch.Tensor, topk: int, temperature: float, token_counts: torch.Tensor = None, frequency_penalty: float = 0.02):
+def sample_topk(logits: torch.Tensor, topk: int, temperature: float, token_counts: torch.Tensor = None, frequency_penalty: float = 0.02, silence_penalty: torch.Tensor = None):
     logits = logits / temperature
 
     if topk > 0:
@@ -85,6 +85,11 @@ def sample_topk(logits: torch.Tensor, topk: int, temperature: float, token_count
     if token_counts is not None and token_counts.numel() > 0 and frequency_penalty != 0.0:
         # token_counts should be same shape as logits vocab dimension
         scores_processed = scores_processed - (frequency_penalty * token_counts)
+    
+    # Apply silence penalty - subtract penalty from logits for silence-correlated tokens
+    if silence_penalty is not None and silence_penalty.numel() > 0:
+        silence_penalty = silence_penalty.to(scores_processed.device)
+        scores_processed = scores_processed - silence_penalty
     
     scores_processed = torch.nn.functional.log_softmax(scores_processed, dim=-1)
     probs = torch.nn.functional.softmax(scores_processed, dim=-1)
@@ -143,6 +148,7 @@ class Model(
         topk: int,
         token_counts: dict = None,
         frequency_penalty: float = 0.02,
+        silence_penalties: dict = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -153,6 +159,7 @@ class Model(
             topk: top-k sampling parameter
             token_counts: dict mapping codebook index to token count tensor
             frequency_penalty: penalty factor per token occurrence (0.0 = no penalty)
+            silence_penalties: dict mapping codebook index to silence penalty tensor
 
         Returns:
             (batch_size, audio_num_codebooks) sampled tokens
@@ -171,7 +178,8 @@ class Model(
         c0_logits = self.codebook0_head(last_h)
         # Get token counts for codebook 0
         c0_counts = token_counts.get(0) if token_counts is not None else None
-        c0_sample = sample_topk(c0_logits, topk, temperature, c0_counts, frequency_penalty)
+        c0_silence = silence_penalties.get(0) if silence_penalties is not None else None
+        c0_sample = sample_topk(c0_logits, topk, temperature, c0_counts, frequency_penalty, c0_silence)
         c0_embed = self._embed_audio(0, c0_sample)
 
         curr_h = torch.cat([last_h.unsqueeze(1), c0_embed], dim=1)
@@ -188,7 +196,8 @@ class Model(
             ci_logits = torch.mm(decoder_h[:, -1, :], self.audio_head[i - 1])
             # Get token counts for this codebook
             ci_counts = token_counts.get(i) if token_counts is not None else None
-            ci_sample = sample_topk(ci_logits, topk, temperature, ci_counts, frequency_penalty)
+            ci_silence = silence_penalties.get(i) if silence_penalties is not None else None
+            ci_sample = sample_topk(ci_logits, topk, temperature, ci_counts, frequency_penalty, ci_silence)
             ci_embed = self._embed_audio(i, ci_sample)
 
             curr_h = ci_embed

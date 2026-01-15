@@ -398,6 +398,10 @@ class Generator:
             total_silent_chunks = 0
             max_silence_restarts = 2  # Max restarts before giving up
             frames_since_restart = 0
+            
+            # Silence penalties (built from token analyzer)
+            silence_penalties = None
+            silence_penalty_active = False
 
             while i < max_generation_len:
                 batch_end = min(i + batch_size, max_generation_len)
@@ -418,7 +422,18 @@ class Generator:
                     with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                         effective_temperature = min(1.3, temperature + temp_boost)
                         effective_topk = (max(topk, 80) if temp_boost > 0 else topk)
-                        sample = self._model.generate_frame(curr_tokens, curr_tokens_mask, curr_pos, effective_temperature, effective_topk, token_counts, frequency_penalty)
+                        
+                        # Apply silence penalties if we're in a silence situation
+                        current_silence_penalties = None
+                        if silence_penalty_active and silence_penalties is not None:
+                            current_silence_penalties = silence_penalties
+                        
+                        sample = self._model.generate_frame(
+                            curr_tokens, curr_tokens_mask, curr_pos, 
+                            effective_temperature, effective_topk, 
+                            token_counts, frequency_penalty,
+                            silence_penalties=current_silence_penalties
+                        )
                         if torch.cuda.is_available() and hasattr(torch, "cuda") and hasattr(torch.cuda, "is_available"):
                             try:
                                 torch.cuda.synchronize()  # Force sync before checking
@@ -538,6 +553,19 @@ class Generator:
                             f"[SILENCE WATCHDOG] Applying temp boost and frequency penalty increase"
                         )
                         logged_silence_nudge = True
+                        
+                        # Build silence penalties from token analyzer
+                        silence_penalties = {}
+                        for cb_idx in range(self._num_codebooks):
+                            penalty_tensor = torch.zeros(self._model.config.audio_vocab_size, device=self.device)
+                            for token_id in self._token_analyzer.silence_tokens[cb_idx]:
+                                penalty_tensor[token_id] = 2.0  # Strong penalty
+                            if penalty_tensor.sum() > 0:
+                                silence_penalties[cb_idx] = penalty_tensor
+                        
+                        if silence_penalties:
+                            silence_penalty_active = True
+                            logger.info(f"[SILENCE PENALTY] Activated penalties for {len(silence_penalties)} codebooks")
                     
                     # Check if we should restart generation due to prolonged silence
                     if silent_run_ms >= silence_restart_threshold_ms and silence_restart_count < max_silence_restarts:
@@ -564,6 +592,12 @@ class Generator:
                             
                             # Continue generation with boosted parameters
                             continue
+                    
+                    # Clear silence penalties once we have good audio again
+                    if silent_chunk_streak == 0 and silence_penalty_active:
+                        silence_penalty_active = False
+                        silence_penalties = None
+                        logger.info(f"[SILENCE PENALTY] Deactivated - audio recovered")
                     
                     # Keep remaining frames for next iteration
                     frame_buffer = frame_buffer[expected_frame_count:]
