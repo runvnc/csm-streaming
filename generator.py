@@ -28,12 +28,14 @@ class TokenAnalyzer:
     # Pre-identified silence tokens from empirical observation
     # These tokens consistently appear during silent/dead-air periods
     KNOWN_SILENCE_TOKENS = {
-        0: {752, 948, 1850, 1926},  # Codebook 0
-        1: {243},                    # Codebook 1 - this one is very consistent
-        2: {783, 1178, 1559},        # Codebook 2
-        3: {142, 164, 546, 1348},    # Codebook 3
+        0: {84, 175, 448, 481, 666, 752, 948, 1850, 1926, 2029},  # Codebook 0
+        1: {243, 1056, 1211},         # Codebook 1 - 243 is very consistent
+        2: {783, 1178, 1559, 1697},   # Codebook 2
+        3: {142, 164, 546, 1348},     # Codebook 3
         # Higher codebooks may have silence tokens too but these are the main ones
     }
+    
+    SILENCE_PENALTY_STRENGTH = 5.0  # Strong penalty to discourage silence tokens
     
     def __init__(self, num_codebooks: int, vocab_size: int):
         self.num_codebooks = num_codebooks
@@ -420,6 +422,8 @@ class Generator:
             # Silence penalties (built from token analyzer)
             silence_penalties = None
             silence_penalty_active = False
+            silence_penalty_cooldown = 0  # Keep penalties active for N more chunks after recovery
+            SILENCE_PENALTY_COOLDOWN_CHUNKS = 10  # How many good chunks before deactivating
 
             while i < max_generation_len:
                 batch_end = min(i + batch_size, max_generation_len)
@@ -443,7 +447,7 @@ class Generator:
                         
                         # Apply silence penalties if we're in a silence situation
                         current_silence_penalties = None
-                        if silence_penalty_active and silence_penalties is not None:
+                        if (silence_penalty_active or silence_penalty_cooldown > 0) and silence_penalties is not None:
                             current_silence_penalties = silence_penalties
                         
                         sample = self._model.generate_frame(
@@ -577,7 +581,7 @@ class Generator:
                         for cb_idx in range(self._num_codebooks):
                             penalty_tensor = torch.zeros(self._model.config.audio_vocab_size, device=self.device)
                             for token_id in self._token_analyzer.silence_tokens[cb_idx]:
-                                penalty_tensor[token_id] = 2.0  # Strong penalty
+                                penalty_tensor[token_id] = TokenAnalyzer.SILENCE_PENALTY_STRENGTH
                             if penalty_tensor.sum() > 0:
                                 silence_penalties[cb_idx] = penalty_tensor
                         
@@ -612,10 +616,17 @@ class Generator:
                             continue
                     
                     # Clear silence penalties once we have good audio again
-                    if silent_chunk_streak == 0 and silence_penalty_active:
-                        silence_penalty_active = False
-                        silence_penalties = None
-                        logger.info(f"[SILENCE PENALTY] Deactivated - audio recovered")
+                    if silent_chunk_streak == 0:
+                        if silence_penalty_active:
+                            # Start cooldown instead of immediate deactivation
+                            silence_penalty_active = False
+                            silence_penalty_cooldown = SILENCE_PENALTY_COOLDOWN_CHUNKS
+                            logger.info(f"[SILENCE PENALTY] Starting cooldown ({SILENCE_PENALTY_COOLDOWN_CHUNKS} chunks)")
+                        elif silence_penalty_cooldown > 0:
+                            silence_penalty_cooldown -= 1
+                            if silence_penalty_cooldown == 0:
+                                silence_penalties = None
+                                logger.info(f"[SILENCE PENALTY] Fully deactivated after cooldown")
                     
                     # Keep remaining frames for next iteration
                     frame_buffer = frame_buffer[expected_frame_count:]
