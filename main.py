@@ -624,7 +624,6 @@ def trim_silence(audio_tensor, sample_rate=24000, threshold_db=-40, min_silence_
     original_duration = len(audio_np) / sample_rate
     trimmed_duration = len(trimmed) / sample_rate
     if original_duration - trimmed_duration > 0.1:
-        logger.info(f\"[SILENCE TRIM] Trimmed {original_duration:.2f}s -> {trimmed_duration:.2f}s (removed {original_duration - trimmed_duration:.2f}s)\")
         logger.info(f"[SILENCE TRIM] Trimmed {original_duration:.2f}s -> {trimmed_duration:.2f}s (removed {original_duration - trimmed_duration:.2f}s)")
     
     return torch.tensor(trimmed, device=audio_tensor.device, dtype=audio_tensor.dtype)
