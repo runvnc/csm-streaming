@@ -460,7 +460,7 @@ class Generator:
 
                     if (silent_run_ms >= 1000.0) and (not logged_silence_nudge):
                         logger.info(
-                            f\"[SILENCE WATCHDOG] Near-silence for ~{silent_run_ms:.0f}ms; boosting sampling and discouraging EOS\"
+                            f"[SILENCE WATCHDOG] Near-silence for ~{silent_run_ms:.0f}ms; boosting sampling and discouraging EOS"
                         )
                         logged_silence_nudge = True
                     
