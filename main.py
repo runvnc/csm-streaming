@@ -296,6 +296,27 @@ def initialize_models(config_data: CompanionConfig):
                    "on_speech_end":   on_speech_end},
     )
 
+    # AI VAD monitor (no callbacks; used only to set/clear ai_nudge_event)
+    # Reset state each time models are initialized.
+    global ai_vad_monitor, ai_nudge_event, ai_nospeech_ms, ai_speech_ms
+    ai_nudge_event.clear()
+    ai_nospeech_ms = 0.0
+    ai_speech_ms = 0.0
+    try:
+        if hasattr(ai_vad_model, "to"):
+            ai_vad_model = ai_vad_model.to("cpu")
+        ai_vad_monitor = VoiceActivityDetector(
+            model=ai_vad_model,
+            utils=vad_utils,
+            sample_rate=16_000,
+            threshold=config_data.vad_threshold,
+            silence_duration=10_000,
+        )
+        logger.info("[AI VAD] AI VAD monitor initialized")
+    except Exception as e:
+        ai_vad_monitor = None
+        logger.warning(f"[AI VAD] Failed to initialize AI VAD monitor: {e}")
+
     load_reference_segments(config_data)
 
     start_model_thread()
