@@ -57,12 +57,16 @@ ai_nospeech_ms = 0.0
 ai_speech_ms = 0.0
 # Faster detection so we nudge quickly when the model enters a dead-air/no-speech regime.
 AI_NUDGE_ON_MS = 400.0
-AI_NUDGE_OFF_MS = 200.0
+# Require more sustained speech before clearing to reduce flip/flop.
+AI_NUDGE_OFF_MS = 800.0
+# Minimum time to keep nudge on once triggered (prevents rapid toggling on intermittent speech blips).
+AI_NUDGE_MIN_ON_MS = 1500.0
 ai_vad_lock = threading.Lock()
+ai_nudge_set_time = 0.0
 
 def update_ai_vad_and_nudge(audio_chunk_np: np.ndarray, sample_rate: int):
     """Update AI VAD state and set/clear ai_nudge_event based on sustained non-speech."""
-    global ai_vad_monitor, ai_nudge_event, ai_nospeech_ms, ai_speech_ms
+    global ai_vad_monitor, ai_nudge_event, ai_nospeech_ms, ai_speech_ms, ai_nudge_set_time
     if ai_vad_monitor is None:
         return
 
@@ -107,10 +111,15 @@ def update_ai_vad_and_nudge(audio_chunk_np: np.ndarray, sample_rate: int):
         # Hysteresis to prevent flip-flopping
         if (not ai_nudge_event.is_set()) and (ai_nospeech_ms >= AI_NUDGE_ON_MS):
             ai_nudge_event.set()
+            ai_nudge_set_time = time.time()
             logger.info(f"[AI VAD] No-speech for ~{ai_nospeech_ms:.0f}ms -> setting nudge flag")
-        elif ai_nudge_event.is_set() and (ai_speech_ms >= AI_NUDGE_OFF_MS):
-            ai_nudge_event.clear()
-            logger.info(f"[AI VAD] Speech for ~{ai_speech_ms:.0f}ms -> clearing nudge flag")
+        elif ai_nudge_event.is_set():
+            held_ms = (time.time() - ai_nudge_set_time) * 1000.0 if ai_nudge_set_time else 0.0
+            if held_ms < AI_NUDGE_MIN_ON_MS:
+                return
+            if ai_speech_ms >= AI_NUDGE_OFF_MS:
+                ai_nudge_event.clear()
+                logger.info(f"[AI VAD] Speech for ~{ai_speech_ms:.0f}ms -> clearing nudge flag")
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -299,10 +308,11 @@ def initialize_models(config_data: CompanionConfig):
 
     # AI VAD monitor (no callbacks; used only to set/clear ai_nudge_event)
     # Reset state each time models are initialized.
-    global ai_vad_monitor, ai_nudge_event, ai_nospeech_ms, ai_speech_ms
+    global ai_vad_monitor, ai_nudge_event, ai_nospeech_ms, ai_speech_ms, ai_nudge_set_time
     ai_nudge_event.clear()
     ai_nospeech_ms = 0.0
     ai_speech_ms = 0.0
+    ai_nudge_set_time = 0.0
     try:
         if hasattr(ai_vad_model, "to"):
             ai_vad_model = ai_vad_model.to("cpu")
