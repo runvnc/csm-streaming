@@ -385,7 +385,8 @@ class Generator:
             # Strategy:
             #   1) Stop on EOS (all-zero frames).
             #   2) If we see near-silent decoded audio for ~1s+, we can nudge sampling (handled below).
-            silence_rms_threshold = 1.0e-4
+            silence_rms_threshold = 0.01  # Raised from 1e-4 - that was too strict
+            low_energy_threshold = 0.05   # For logging "low energy" chunks
             silent_chunk_streak = 0
             silent_run_ms = 0.0
             logged_silence_nudge = False
@@ -393,6 +394,8 @@ class Generator:
             # Silence restart tracking
             silence_restart_threshold_ms = 1500.0  # Restart after 1.5s of silence
             silence_restart_count = 0
+            chunk_count = 0
+            total_silent_chunks = 0
             max_silence_restarts = 2  # Max restarts before giving up
             frames_since_restart = 0
 
@@ -497,14 +500,24 @@ class Generator:
                     else:
                         rms = 0.0
                         chunk_duration_ms = 0.0
+                    
+                    chunk_count += 1
+                    
+                    # Log RMS for every chunk to help debug silence detection
+                    if chunk_count <= 10 or chunk_count % 20 == 0 or rms < low_energy_threshold:
+                        logger.info(f"[CHUNK {chunk_count}] RMS={rms:.4f}, duration={chunk_duration_ms:.0f}ms, silent_streak={silent_chunk_streak}")
 
                     if rms < silence_rms_threshold:
                         silent_chunk_streak += 1
+                        total_silent_chunks += 1
+                        logger.info(f"[SILENCE DETECTED] Chunk {chunk_count}: RMS={rms:.4f} < threshold={silence_rms_threshold}, streak={silent_chunk_streak}")
                     else:
                         silent_chunk_streak = 0
                     
                     # Mark frames for token analysis
                     is_silent_chunk = rms < silence_rms_threshold
+                    if is_silent_chunk:
+                        logger.info(f"[TOKEN ANALYSIS] Marking chunk {chunk_count} as SILENT")
                     self._token_analyzer.mark_chunk_as_silent(is_silent_chunk, num_frames=buffer_size)
 
                     silent_run_ms = silent_chunk_streak * chunk_duration_ms
