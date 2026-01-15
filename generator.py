@@ -25,6 +25,16 @@ logger = logging.getLogger(__name__)
 class TokenAnalyzer:
     """Tracks token patterns to identify silence-producing tokens."""
     
+    # Pre-identified silence tokens from empirical observation
+    # These tokens consistently appear during silent/dead-air periods
+    KNOWN_SILENCE_TOKENS = {
+        0: {752, 948, 1850, 1926},  # Codebook 0
+        1: {243},                    # Codebook 1 - this one is very consistent
+        2: {783, 1178, 1559},        # Codebook 2
+        3: {142, 164, 546, 1348},    # Codebook 3
+        # Higher codebooks may have silence tokens too but these are the main ones
+    }
+    
     def __init__(self, num_codebooks: int, vocab_size: int):
         self.num_codebooks = num_codebooks
         self.vocab_size = vocab_size
@@ -35,7 +45,12 @@ class TokenAnalyzer:
         # Recent frames buffer for correlation
         self.recent_frames = collections.deque(maxlen=50)
         # Tokens that are strongly correlated with silence
+        # Pre-seed with known silence tokens
         self.silence_tokens = {i: set() for i in range(num_codebooks)}
+        for cb_idx, tokens in self.KNOWN_SILENCE_TOKENS.items():
+            if cb_idx < num_codebooks:
+                self.silence_tokens[cb_idx] = tokens.copy()
+        
         self.analysis_count = 0
         
     def record_frame(self, sample: torch.Tensor):
@@ -60,12 +75,15 @@ class TokenAnalyzer:
             
     def _update_silence_tokens(self):
         """Identify tokens that appear much more often in silence than speech."""
+        # Start with known silence tokens, then add newly discovered ones
         for cb_idx in range(self.num_codebooks):
-            self.silence_tokens[cb_idx] = set()
+            # Keep known tokens, reset discovered ones
+            known = self.KNOWN_SILENCE_TOKENS.get(cb_idx, set())
+            self.silence_tokens[cb_idx] = known.copy()
             for token_id, silence_count in self.silence_token_counts[cb_idx].items():
                 speech_count = self.speech_token_counts[cb_idx].get(token_id, 0)
                 # Token appears 3x more in silence than speech
-                if silence_count > 5 and silence_count > speech_count * 3:
+                if silence_count > 5 and silence_count > speech_count * 3 and token_id not in known:
                     self.silence_tokens[cb_idx].add(token_id)
                     
     def get_silence_penalty(self, codebook_idx: int) -> torch.Tensor:
