@@ -27,7 +27,7 @@ from typing import Optional
 from generator import Segment, load_csm_1b_local
 from llm_interface import LLMInterface
 from rag_system import RAGSystem 
-from vad import AudioStreamProcessor
+from vad import AudioStreamProcessor, VoiceActivityDetector
 from pydantic import BaseModel
 import logging
 from config import ConfigManager
@@ -46,6 +46,70 @@ audio_fade_duration = 0.3  # seconds for fade-out
 last_interrupt_time = 0
 interrupt_cooldown = 6.0  # seconds between allowed interrupts
 audio_chunk_buffer = []  # Buffer to store the most recent audio chunks for fade-out
+
+# --- AI VAD-based "nudge" flag ---
+# If generated AI audio is classified as "no speech" for >~1s while generation is active,
+# we set this event so generator.generate_stream() can temporarily boost sampling and
+# resample away from EOS/zero frames.
+ai_nudge_event = threading.Event()
+ai_vad_monitor = None
+ai_nospeech_ms = 0.0
+ai_speech_ms = 0.0
+AI_NUDGE_ON_MS = 1000.0
+AI_NUDGE_OFF_MS = 300.0
+ai_vad_lock = threading.Lock()
+
+def update_ai_vad_and_nudge(audio_chunk_np: np.ndarray, sample_rate: int):
+    """Update AI VAD state and set/clear ai_nudge_event based on sustained non-speech."""
+    global ai_vad_monitor, ai_nudge_event, ai_nospeech_ms, ai_speech_ms
+    if ai_vad_monitor is None:
+        return
+
+    # Duration based on original chunk sample rate
+    chunk_duration_ms = (len(audio_chunk_np) / float(sample_rate)) * 1000.0 if len(audio_chunk_np) else 0.0
+    if chunk_duration_ms <= 0.0:
+        return
+
+    # Ensure mono float32
+    if audio_chunk_np.ndim > 1:
+        audio_chunk_np = np.mean(audio_chunk_np, axis=1)
+    if audio_chunk_np.dtype != np.float32:
+        audio_chunk_np = audio_chunk_np.astype(np.float32)
+
+    # Resample to 16k for Silero VAD
+    if sample_rate != 16000:
+        try:
+            t = torch.tensor(audio_chunk_np).unsqueeze(0)
+            t16 = torchaudio.functional.resample(t, orig_freq=sample_rate, new_freq=16000)
+            audio_16k = t16.squeeze(0).cpu().numpy().astype(np.float32)
+        except Exception as e:
+            logger.warning(f"[AI VAD] Resample failed: {e}")
+            return
+    else:
+        audio_16k = audio_chunk_np
+
+    with ai_vad_lock:
+        try:
+            ai_vad_monitor.process_audio_chunk(audio_16k)
+            chunk_has_speech = bool(ai_vad_monitor.last_speech_detected)
+        except Exception as e:
+            logger.warning(f"[AI VAD] process_audio_chunk failed: {e}")
+            return
+
+        if chunk_has_speech:
+            ai_speech_ms += chunk_duration_ms
+            ai_nospeech_ms = 0.0
+        else:
+            ai_nospeech_ms += chunk_duration_ms
+            ai_speech_ms = 0.0
+
+        # Hysteresis to prevent flip-flopping
+        if (not ai_nudge_event.is_set()) and (ai_nospeech_ms >= AI_NUDGE_ON_MS):
+            ai_nudge_event.set()
+            logger.info(f"[AI VAD] No-speech for ~{ai_nospeech_ms:.0f}ms -> setting nudge flag")
+        elif ai_nudge_event.is_set() and (ai_speech_ms >= AI_NUDGE_OFF_MS):
+            ai_nudge_event.clear()
+            logger.info(f"[AI VAD] Speech for ~{ai_speech_ms:.0f}ms -> clearing nudge flag")
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -218,6 +282,11 @@ def initialize_models(config_data: CompanionConfig):
     vad_model, vad_utils = torch.hub.load('snakers4/silero-vad',
                                           model='silero_vad',
                                           force_reload=False)
+
+    # IMPORTANT: use a separate VAD model instance for AI monitoring to avoid state interference.
+    import copy
+    ai_vad_model = copy.deepcopy(vad_model)
+
     vad_processor = AudioStreamProcessor(
         model=vad_model,
         utils=vad_utils,
@@ -459,6 +528,12 @@ def model_worker(cfg: CompanionConfig):
         torch._inductor.config.fx_graph_cache = False  # Disable graph caching
         logger.info("Loading voice model inside worker thread …")
         generator = load_csm_1b_local(cfg.model_path, "cuda")
+        # Provide VAD-based nudge flag to generator (checked inside generate_stream)
+        try:
+            generator._nudge_event = ai_nudge_event
+            logger.info("[AI VAD] Attached ai_nudge_event to generator")
+        except Exception as e:
+            logger.warning(f"[AI VAD] Failed to attach nudge event: {e}")
         logger.info("Voice model ready (compiled with cudagraphs)")
 
     while model_thread_running.is_set():
@@ -873,6 +948,13 @@ def audio_generation_thread(text, output_file):
                 
                 # Convert to numpy and send to audio queue
                 chunk_array = audio_chunk.cpu().numpy().astype(np.float32)
+
+                # Update AI VAD monitor and possibly set nudge flag
+                try:
+                    update_ai_vad_and_nudge(chunk_array, generator.sample_rate)
+                except Exception as e:
+                    logger.warning(f"[AI VAD] update_ai_vad_and_nudge failed: {e}")
+
                 audio_queue.put(chunk_array)
                 
                 if chunk_counter == 1:

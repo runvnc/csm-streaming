@@ -312,6 +312,9 @@ class Generator:
             token_counts = {i: torch.zeros(self._model.config.audio_vocab_size, device=self.device) 
                            for i in range(self._num_codebooks)}
 
+            # Optional external nudge flag (e.g., VAD in main.py)
+            nudge_event = getattr(self, "_nudge_event", None)
+
             # --- Silence/EOS watchdog ---
             # Problem: sometimes the model emits all-zero frames (treated as EOS) too early,
             # cutting off mid-sentence or yielding long silence.
@@ -341,6 +344,8 @@ class Generator:
                         temp_boost = 0.15
                     if silent_run_ms >= 2000:
                         temp_boost = 0.25
+                    if nudge_event is not None and nudge_event.is_set():
+                        temp_boost = max(temp_boost, 0.25)
                     with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                         effective_temperature = min(1.3, temperature + temp_boost)
                         effective_topk = (max(topk, 80) if temp_boost > 0 else topk)
@@ -363,10 +368,10 @@ class Generator:
                         # - Heavily penalize token 0 via frequency penalty counts.
                         # - Try a few resamples with higher temp/topk.
                         for cb_idx in range(self._num_codebooks):
-                            token_counts[cb_idx][0] += 250
+                            token_counts[cb_idx][0] += (500 if (nudge_event is not None and nudge_event.is_set()) else 250)
 
                         # Try harder if EOS is early OR we've been near-silent for a while.
-                        hard_mode = (i < min_required_frames) or (silent_run_ms >= 1000.0)
+                        hard_mode = (i < min_required_frames) or (silent_run_ms >= 1000.0) or (nudge_event is not None and nudge_event.is_set())
                         attempts = 5 if hard_mode else 2
 
                         for _attempt in range(attempts):

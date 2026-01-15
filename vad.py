@@ -3,6 +3,7 @@ import torch
 from typing import Callable, Dict, List
 import time
 from collections import deque
+
 class VoiceActivityDetector:
     def __init__(
         self,
@@ -23,6 +24,10 @@ class VoiceActivityDetector:
         self.is_speaking = False
         self.silent_frames = 0
         self.frame_size = 512 if sample_rate == 16000 else 256  # Required by Silero VAD
+
+        # Expose per-chunk diagnostics for downstream logic (e.g. AI nudge watchdog)
+        self.last_speech_detected = False
+        self.last_max_speech_prob = 0.0
         
         print(f"VAD initialized with threshold {threshold}, frame size {self.frame_size}, silence duration {silence_duration}")
 
@@ -84,6 +89,9 @@ class VoiceActivityDetector:
         # print(f"Silent frames: {self.silent_frames}, Threshold: {self.silence_duration}")
         
         # Update speaking state based on all chunks
+        self.last_speech_detected = bool(speech_detected)
+        self.last_max_speech_prob = float(max(speech_probs) if speech_probs else 0.0)
+
         if speech_detected:
             self.is_speaking = True
             self.silent_frames = 0
