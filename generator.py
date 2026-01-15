@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import math
+import collections
 import os
 from typing import List, Tuple, Generator as PyGenerator, Optional, Callable
 import time
@@ -19,6 +20,66 @@ from transformers import AutoTokenizer
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Token analysis for silence detection
+class TokenAnalyzer:
+    """Tracks token patterns to identify silence-producing tokens."""
+    
+    def __init__(self, num_codebooks: int, vocab_size: int):
+        self.num_codebooks = num_codebooks
+        self.vocab_size = vocab_size
+        # Track tokens seen during silent chunks
+        self.silence_token_counts = {i: collections.Counter() for i in range(num_codebooks)}
+        # Track tokens seen during speech chunks  
+        self.speech_token_counts = {i: collections.Counter() for i in range(num_codebooks)}
+        # Recent frames buffer for correlation
+        self.recent_frames = collections.deque(maxlen=50)
+        # Tokens that are strongly correlated with silence
+        self.silence_tokens = {i: set() for i in range(num_codebooks)}
+        self.analysis_count = 0
+        
+    def record_frame(self, sample: torch.Tensor):
+        """Record a generated frame for later analysis."""
+        self.recent_frames.append(sample.clone().cpu())
+        
+    def mark_chunk_as_silent(self, is_silent: bool, num_frames: int = 10):
+        """Mark recent frames as silent or speech-containing."""
+        frames_to_mark = list(self.recent_frames)[-num_frames:]
+        for frame in frames_to_mark:
+            for cb_idx in range(min(frame.size(1), self.num_codebooks)):
+                token_id = frame[0, cb_idx].item()
+                if is_silent:
+                    self.silence_token_counts[cb_idx][token_id] += 1
+                else:
+                    self.speech_token_counts[cb_idx][token_id] += 1
+        
+        self.analysis_count += 1
+        # Periodically update silence token set
+        if self.analysis_count % 10 == 0:
+            self._update_silence_tokens()
+            
+    def _update_silence_tokens(self):
+        """Identify tokens that appear much more often in silence than speech."""
+        for cb_idx in range(self.num_codebooks):
+            self.silence_tokens[cb_idx] = set()
+            for token_id, silence_count in self.silence_token_counts[cb_idx].items():
+                speech_count = self.speech_token_counts[cb_idx].get(token_id, 0)
+                # Token appears 3x more in silence than speech
+                if silence_count > 5 and silence_count > speech_count * 3:
+                    self.silence_tokens[cb_idx].add(token_id)
+                    
+    def get_silence_penalty(self, codebook_idx: int) -> torch.Tensor:
+        """Get penalty tensor for silence-correlated tokens."""
+        penalty = torch.zeros(self.vocab_size)
+        for token_id in self.silence_tokens[codebook_idx]:
+            penalty[token_id] = 0.5  # Penalty value
+        return penalty
+    
+    def log_stats(self):
+        """Log current silence token statistics."""
+        for cb_idx in range(min(4, self.num_codebooks)):  # Log first 4 codebooks
+            if self.silence_tokens[cb_idx]:
+                logger.info(f"[TOKEN ANALYSIS] Codebook {cb_idx} silence tokens: {sorted(self.silence_tokens[cb_idx])[:20]}")
 
 @dataclass
 class Segment:
@@ -70,6 +131,9 @@ class Generator:
         self._text_token_cache = {}
         # Cache for segment tokenization (keyed by id(segment) or hash)
         self._segment_token_cache = {}
+        
+        # Token analyzer for silence detection
+        self._token_analyzer = TokenAnalyzer(num_codebooks, model.config.audio_vocab_size)
         
         torch.set_num_threads(16)
         torch.cuda.set_per_process_memory_fraction(0.95)
@@ -325,6 +389,12 @@ class Generator:
             silent_chunk_streak = 0
             silent_run_ms = 0.0
             logged_silence_nudge = False
+            
+            # Silence restart tracking
+            silence_restart_threshold_ms = 1500.0  # Restart after 1.5s of silence
+            silence_restart_count = 0
+            max_silence_restarts = 2  # Max restarts before giving up
+            frames_since_restart = 0
 
             while i < max_generation_len:
                 batch_end = min(i + batch_size, max_generation_len)
@@ -374,6 +444,10 @@ class Generator:
                     last_sample = sample.clone()
 
                     # Update token counts for frequency penalty
+                    # Also record frame for silence analysis
+                    self._token_analyzer.record_frame(sample)
+                    
+                    frames_since_restart += 1
                     for cb_idx in range(sample.size(1)):
                         token_id = sample[0, cb_idx].item()
                         token_counts[cb_idx][token_id] += 1
@@ -428,14 +502,55 @@ class Generator:
                         silent_chunk_streak += 1
                     else:
                         silent_chunk_streak = 0
+                    
+                    # Mark frames for token analysis
+                    is_silent_chunk = rms < silence_rms_threshold
+                    self._token_analyzer.mark_chunk_as_silent(is_silent_chunk, num_frames=buffer_size)
 
                     silent_run_ms = silent_chunk_streak * chunk_duration_ms
 
-                    if (silent_run_ms >= 1000.0) and (not logged_silence_nudge):
+                    if (silent_run_ms >= 500.0) and (not logged_silence_nudge):
+                        # Log token statistics when we detect silence
                         logger.info(
-                            f"[SILENCE WATCHDOG] Near-silence for ~{silent_run_ms:.0f}ms; boosting sampling and discouraging EOS"
+                            f"[SILENCE WATCHDOG] Near-silence for ~{silent_run_ms:.0f}ms (RMS={rms:.2e}); boosting sampling"
+                        )
+                        # Log recent token patterns
+                        recent_frames = list(self._token_analyzer.recent_frames)[-10:]
+                        if recent_frames:
+                            for fidx, frame in enumerate(recent_frames[-5:]):
+                                tokens_str = ", ".join([f"cb{cb}:{frame[0,cb].item()}" for cb in range(min(4, frame.size(1)))])
+                                logger.info(f"[SILENCE TOKENS] Frame -{5-fidx}: {tokens_str}")
+                        self._token_analyzer.log_stats()
+                        logger.info(
+                            f"[SILENCE WATCHDOG] Applying temp boost and frequency penalty increase"
                         )
                         logged_silence_nudge = True
+                    
+                    # Check if we should restart generation due to prolonged silence
+                    if silent_run_ms >= silence_restart_threshold_ms and silence_restart_count < max_silence_restarts:
+                        if frames_since_restart > 20:  # Only restart if we've generated enough frames
+                            silence_restart_count += 1
+                            logger.warning(
+                                f"[SILENCE RESTART] Silence for {silent_run_ms:.0f}ms, restarting generation "
+                                f"(attempt {silence_restart_count}/{max_silence_restarts})"
+                            )
+                            
+                            # Reset token counts to reduce bias from silence tokens
+                            for cb_idx in token_counts:
+                                # Reduce counts by 50% to partially reset
+                                token_counts[cb_idx] = token_counts[cb_idx] * 0.5
+                            
+                            # Clear frame buffer to discard silent frames
+                            frame_buffer = []
+                            
+                            # Reset silence tracking
+                            silent_chunk_streak = 0
+                            silent_run_ms = 0.0
+                            logged_silence_nudge = False
+                            frames_since_restart = 0
+                            
+                            # Continue generation with boosted parameters
+                            continue
                     
                     # Keep remaining frames for next iteration
                     frame_buffer = frame_buffer[expected_frame_count:]
