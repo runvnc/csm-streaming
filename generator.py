@@ -319,12 +319,8 @@ class Generator:
             # Problem: sometimes the model emits all-zero frames (treated as EOS) too early,
             # cutting off mid-sentence or yielding long silence.
             # Strategy:
-            #   1) Do NOT stop on EOS (all-zero frames). Instead, try to resample away from it.
-            #   2) If we see near-silent decoded audio for ~1s+, temporarily discourage token 0.
-            words = max(1, len(text.split()))
-            min_audio_ms = max(400, min(2500, int(words * 180)))  # ~180ms/word, clamped
-            min_required_frames = int(min_audio_ms / 80)
-            consecutive_eos_frames = 0
+            #   1) Stop on EOS (all-zero frames).
+            #   2) If we see near-silent decoded audio for ~1s+, we can nudge sampling (handled below).
             silence_rms_threshold = 1.0e-4
             silent_chunk_streak = 0
             silent_run_ms = 0.0
@@ -360,37 +356,9 @@ class Generator:
                                 print("Error checking tensor, stopping generation")
                                 break
 
-                    # Treat all-zero frame as EOS/silence, but don't stop immediately.
+                    # Treat all-zero frame as EOS/end of generation.
                     if torch.all(sample == 0):
-                        consecutive_eos_frames += 1
-
-                        # We do NOT stop on persistent EOS (user request). Instead:
-                        # - Heavily penalize token 0 via frequency penalty counts.
-                        # - Try a few resamples with higher temp/topk.
-                        for cb_idx in range(self._num_codebooks):
-                            token_counts[cb_idx][0] += (500 if (nudge_event is not None and nudge_event.is_set()) else 250)
-
-                        # Try harder if EOS is early OR we've been near-silent for a while.
-                        hard_mode = (i < min_required_frames) or (silent_run_ms >= 1000.0) or (nudge_event is not None and nudge_event.is_set())
-                        attempts = 5 if hard_mode else 2
-
-                        for _attempt in range(attempts):
-                            with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                                resample = self._model.generate_frame(
-                                    curr_tokens,
-                                    curr_tokens_mask,
-                                    curr_pos,
-                                    min(1.3, effective_temperature + (0.25 if hard_mode else 0.10)),
-                                    max(effective_topk, (140 if hard_mode else 110)),
-                                    token_counts,
-                                    frequency_penalty,
-                                )
-                            if not torch.all(resample == 0):
-                                sample = resample
-                                consecutive_eos_frames = 0
-                                break
-                    else:
-                        consecutive_eos_frames = 0
+                        break
                     
                     # Track repeated frames for logging (model stuck in loop - causes silence/hangs)
                     # Based on GitHub issue #122 feedback - but don't stop, just log
