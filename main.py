@@ -899,7 +899,14 @@ def audio_generation_thread(text, output_file):
         avg_wpm = 100
         words_per_second = avg_wpm / 60
         estimated_seconds = len(words) / words_per_second
-        max_audio_length_ms = int(estimated_seconds * 1000)
+        # Add slack so brief stalls (dead-air) don't consume the entire budget and cut off the utterance.
+        # Without slack, any 1-3s pause can cause mid-sentence truncation.
+        max_audio_length_ms = int(estimated_seconds * 1000 * 1.6) + 2000
+        # Clamp to reasonable bounds
+        max_audio_length_ms = max(6000, min(max_audio_length_ms, 90_000))
+        logger.info(
+            f"Audio generation {this_id} - max_audio_length_ms={max_audio_length_ms} (est_seconds={estimated_seconds:.2f}, words={len(words)})"
+        )
         
         # Send request to model thread
         logger.info(f"Audio generation {this_id} - sending request to model thread")
