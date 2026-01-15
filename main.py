@@ -55,8 +55,9 @@ ai_nudge_event = threading.Event()
 ai_vad_monitor = None
 ai_nospeech_ms = 0.0
 ai_speech_ms = 0.0
-AI_NUDGE_ON_MS = 1000.0
-AI_NUDGE_OFF_MS = 300.0
+# Faster detection so we nudge quickly when the model enters a dead-air/no-speech regime.
+AI_NUDGE_ON_MS = 400.0
+AI_NUDGE_OFF_MS = 200.0
 ai_vad_lock = threading.Lock()
 
 def update_ai_vad_and_nudge(audio_chunk_np: np.ndarray, sample_rate: int):
